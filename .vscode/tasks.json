@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Serve app (localhost:8777)",
+      "type": "shell",
+      "command": "python3 -m http.server 8777 --bind 127.0.0.1 --directory public",
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "Reconcile accounts",
+      "type": "shell",
+      "command": "python3 tools/reconcile.py local/budget-data.json --statements local/statements",
+      "problemMatcher": []
+    },
+    {
+      "label": "Preview statement fixes (dry run)",
+      "type": "shell",
+      "command": "python3 tools/apply_fixes.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "Apply statement fixes",
+      "type": "shell",
+      "command": "python3 tools/apply_fixes.py --write",
+      "problemMatcher": []
+    }
+  ]
+}

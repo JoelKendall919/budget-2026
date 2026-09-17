@@ -1,0 +1,22 @@
+{
+  "editor.formatOnSave": true,
+  "editor.tabSize": 2,
+  "editor.insertSpaces": true,
+  "files.eol": "\n",
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+
+  // Live Server / preview points at the deployable folder
+  "liveServer.settings.root": "/public",
+  "liveServer.settings.port": 8777,
+
+  "[python]": { "editor.tabSize": 4 },
+  "[markdown]": { "files.trimTrailingWhitespace": false },
+
+  "search.exclude": {
+    "local/**": true,
+    "legacy/**": true,
+    "**/node_modules": true
+  },
+  "files.associations": { "*.webmanifest": "json" }
+}

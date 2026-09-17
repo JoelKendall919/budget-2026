@@ -1,0 +1,152 @@
+/* =========================================================================
+   Budget 2026 — responsive layer.
+
+   styles.css is the desktop design. This file adapts it for phones and
+   tablets: the sidebar becomes a fixed bottom tab bar, tables stop being
+   squashed, and every control gets a finger-sized hit area.
+
+   Loaded after styles.css, so it deliberately overrides the 900px rule
+   already in there.
+   ========================================================================= */
+
+/* A toast for background events (e.g. "updated from another device"). */
+.toast{
+  position:fixed; left:50%; bottom:calc(76px + env(safe-area-inset-bottom));
+  transform:translate(-50%,14px);
+  background:var(--ink); color:var(--bg);
+  padding:10px 16px; border-radius:22px; font-size:13px; font-weight:600;
+  box-shadow:0 6px 24px rgba(0,0,0,.28);
+  opacity:0; pointer-events:none; transition:opacity .18s ease, transform .18s ease;
+  z-index:80; max-width:min(90vw,420px); text-align:center;
+}
+.toast.show{opacity:1; transform:translate(-50%,0)}
+@media(min-width:721px){ .toast{bottom:24px} }
+
+/* ---------------------------------------------------------------- tablet */
+@media(max-width:1024px){
+  .main{padding:18px 18px 60px}
+  .app{grid-template-columns:184px 1fr}
+}
+
+/* ----------------------------------------------------------------- phone */
+@media(max-width:720px){
+  html,body{overscroll-behavior-y:none}
+
+  .app{display:block; min-height:100dvh}
+
+  /* Sidebar -> bottom tab bar. */
+  .side{
+    position:fixed; left:0; right:0; bottom:0; top:auto;
+    height:auto; z-index:40;
+    flex-direction:row; flex-wrap:nowrap; gap:0;
+    padding:6px 4px calc(6px + env(safe-area-inset-bottom));
+    border-right:none; border-top:1px solid var(--line);
+    box-shadow:0 -2px 12px rgba(16,24,40,.08);
+    overflow:visible;
+  }
+  .side .brand{display:none}
+  .side .foot{
+    display:block; position:fixed; top:0; left:0; right:0;
+    margin:0; padding:7px 14px calc(7px + env(safe-area-inset-top));
+    background:var(--panel); border-top:none; border-bottom:1px solid var(--line);
+    font-size:11px; text-align:right; z-index:39;
+  }
+  .side .foot .themebtn{
+    display:inline-flex; width:auto; margin:0 10px 0 0; vertical-align:-2px;
+  }
+  .side .foot .themebtn button{padding:3px 9px; font-size:10px}
+
+  .nav{
+    flex:1 1 0; min-width:0;
+    flex-direction:column; gap:3px;
+    padding:7px 2px; border-radius:9px;
+    font-size:10px; font-weight:600; text-align:center;
+    position:relative;
+  }
+  .nav .ic{font-size:18px; width:auto; line-height:1}
+  .nav .lb{
+    display:block; width:100%;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  .nav .nbadge{
+    position:absolute; top:2px; right:50%; margin:0;
+    transform:translateX(18px);
+  }
+
+  /* Main content clears the fixed status bar and tab bar. */
+  .main{
+    padding:52px 12px calc(84px + env(safe-area-inset-bottom));
+    max-width:none;
+  }
+
+  .head{gap:8px; margin-bottom:14px}
+  .head h1{font-size:18px}
+  .pad{padding:13px 14px}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(132px,1fr)); gap:10px}
+  .kpi{padding:11px 13px}
+  .kpi .val{font-size:19px}
+  .row2{grid-template-columns:1fr}
+
+  /* Controls: 44px minimum touch target, and no iOS zoom-on-focus
+     (which needs a >=16px font size on the input itself). */
+  select,
+  input[type=text],
+  input[type=number],
+  input[type=date],
+  input[type=email],
+  input[type=password]{
+    font-size:16px; padding:10px 11px; min-height:44px; width:100%;
+  }
+  .btn{min-height:44px; padding:10px 15px}
+  .btn.sm{min-height:34px; padding:7px 11px; font-size:12px}
+  .seg button{min-height:38px; padding:8px 13px}
+  .sel-cat{font-size:16px; min-height:38px}
+  .inline-in{font-size:16px; min-height:36px}
+
+  /* Filter bars stack instead of overflowing. */
+  .flex.wrap{gap:8px}
+  .flex.wrap > select,
+  .flex.wrap > input[type=text]{flex:1 1 140px; min-width:0}
+
+  /* Tables: let them scroll sideways rather than crushing the columns,
+     and keep the date column pinned so a row stays readable. */
+  .tablewrap{
+    overflow-x:auto; -webkit-overflow-scrolling:touch;
+    margin:0 -14px; padding:0 14px;
+    scrollbar-width:thin;
+  }
+  .tablewrap table{min-width:560px}
+  th,td{padding:9px 8px; font-size:13px}
+  th{font-size:10px}
+
+  /* Modals become bottom sheets — far easier to reach one-handed. */
+  .modal-bg{align-items:flex-end; padding:0}
+  .modal{
+    max-width:none; border-radius:16px 16px 0 0;
+    padding:20px 18px calc(24px + env(safe-area-inset-bottom));
+    max-height:88dvh; overflow-y:auto;
+  }
+
+  .dropzone{padding:26px 16px}
+  .legend{font-size:11px; gap:9px}
+}
+
+/* --------------------------------------------------------- small phones */
+@media(max-width:380px){
+  .nav .lb{font-size:9px}
+  .nav .ic{font-size:16px}
+  .main{padding-left:9px; padding-right:9px}
+  .tablewrap{margin:0 -9px; padding:0 9px}
+}
+
+/* ------------------------------------------------------------- printing */
+@media print{
+  .side,.toast{display:none}
+  .main{padding:0; max-width:none}
+  .card{box-shadow:none; break-inside:avoid}
+}
+
+/* People who ask for less motion get less motion. */
+@media(prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms !important; transition-duration:.01ms !important}
+}

@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Open Budget app in Chrome",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:8777/index.html",
+      "webRoot": "${workspaceFolder}/public",
+      "preLaunchTask": "Serve app (localhost:8777)"
+    },
+    {
+      "name": "Python: current file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal"
+    }
+  ]
+}

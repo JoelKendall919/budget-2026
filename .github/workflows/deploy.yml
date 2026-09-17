@@ -1,0 +1,77 @@
+name: Deploy to GitHub Pages
+
+# Builds the static app and publishes it. The Supabase URL and anon key are
+# injected here from repository secrets rather than being committed, so the
+# repo stays clean and you can repoint it without a code change.
+#
+# Set these under: Settings -> Secrets and variables -> Actions
+#   SUPABASE_URL       e.g. https://abcdefghijklm.supabase.co
+#   SUPABASE_ANON_KEY  the project's anon / publishable key
+#
+# Then enable Pages under: Settings -> Pages -> Source: GitHub Actions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish; queue at most one more.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Inject Supabase configuration
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
+            echo "::warning::SUPABASE_URL / SUPABASE_ANON_KEY not set — deploying in local-only mode."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import os, pathlib
+          p = pathlib.Path("public/js/config.js")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace("__SUPABASE_URL__", os.environ["SUPABASE_URL"])
+          s = s.replace("__SUPABASE_ANON_KEY__", os.environ["SUPABASE_ANON_KEY"])
+          p.write_text(s, encoding="utf-8")
+          print("config.js updated")
+          PY
+
+      - name: Guard against committed secrets or personal data
+        run: |
+          # The anon key is fine to publish; the service_role key never is.
+          if grep -rIl "service_role" public/ 2>/dev/null; then
+            echo "::error::service_role key found in public/ — aborting."; exit 1
+          fi
+          if [ -f public/budget-data.json ]; then
+            echo "::error::public/budget-data.json would publish your finances — aborting."; exit 1
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Budget">
+  <rect width="512" height="512" rx="112" fill="#2f6df0"/>
+  <g fill="none" stroke="#ffffff" stroke-width="30" stroke-linecap="round">
+    <path d="M128 352 V232"/>
+    <path d="M214 352 V168"/>
+    <path d="M300 352 V272"/>
+    <path d="M386 352 V136"/>
+    <path d="M104 392 H408" stroke-width="22"/>
+  </g>
+</svg>

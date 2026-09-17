@@ -1,0 +1,53 @@
+# =========================================================================
+# Anything here would put personal financial data into git history.
+# Bank statements, the budget document itself and the spreadsheets stay
+# local. `local/` is the place to keep them.
+# =========================================================================
+
+local/
+*.xlsx
+*.xls
+*.pdf
+
+# Bank statement exports
+Statement*.csv
+transactions.csv
+budget-data*.json
+dropped-historical-entries.json
+
+# The deployed app must never ship the data file
+public/budget-data.json
+
+# Real Supabase credentials, if you keep a local override
+.env
+.env.*
+!.env.example
+public/js/config.local.js
+
+# Reconciliation tool output
+tools/out/
+reports/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# scratch files from local smoke-testing
+public/__seed.*
