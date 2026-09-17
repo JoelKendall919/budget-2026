@@ -69,7 +69,7 @@ You get sync across devices for free on Supabase's free tier.
 
    ```js
    supabaseUrl: "https://yourproject.supabase.co",
-   supabaseAnonKey: "<your anon public key>",
+   supabaseAnonKey: "sb_publishable_…",
    ```
 
    The publishable key is *designed* to be public — it's in every browser
@@ -80,6 +80,11 @@ You get sync across devices for free on Supabase's free tier.
 
    Older projects have JWT-style `anon` / `service_role` keys instead,
    under the *Legacy API keys* tab. Those still work.
+
+   These two values are committed to this repo, which is fine — the
+   publishable key grants nothing on its own. If you'd rather keep them
+   out, set `SUPABASE_URL` and `SUPABASE_ANON_KEY` as GitHub Actions
+   secrets and the deploy workflow will override whatever is in the file.
 
 5. **Load your existing data.** Sign in, then Data → *Import JSON…* and pick
    `local/budget-data.json`. It uploads on the next save. After that every

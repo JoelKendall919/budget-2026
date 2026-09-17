@@ -41,13 +41,24 @@ jobs:
             exit 0
           fi
           python3 - <<'PY'
-          import os, pathlib
+          import os, pathlib, re
           p = pathlib.Path("public/js/config.js")
           s = p.read_text(encoding="utf-8")
-          s = s.replace("__SUPABASE_URL__", os.environ["SUPABASE_URL"])
-          s = s.replace("__SUPABASE_ANON_KEY__", os.environ["SUPABASE_ANON_KEY"])
+
+          # Replace the property values themselves rather than a placeholder
+          # token, so this works whether config.js holds placeholders or the
+          # committed publishable key. Secrets always win.
+          def setval(src, prop, value):
+              pat = re.compile(rf'(\b{prop}\s*:\s*)"[^"]*"')
+              out, n = pat.subn(lambda m: m.group(1) + '"' + value + '"', src, count=1)
+              if not n:
+                  raise SystemExit(f"could not find {prop} in config.js")
+              return out
+
+          s = setval(s, "supabaseUrl",     os.environ["SUPABASE_URL"].rstrip("/"))
+          s = setval(s, "supabaseAnonKey", os.environ["SUPABASE_ANON_KEY"])
           p.write_text(s, encoding="utf-8")
-          print("config.js updated")
+          print("config.js updated from repository secrets")
           PY
 
       - name: Guard against committed secrets or personal data
