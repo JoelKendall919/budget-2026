@@ -37,7 +37,7 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         run: |
           if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then
-            echo "::warning::SUPABASE_URL / SUPABASE_ANON_KEY not set — deploying in local-only mode."
+            echo "::notice::SUPABASE_URL / SUPABASE_ANON_KEY secrets not set — using the values committed in config.js."
             exit 0
           fi
           python3 - <<'PY'
