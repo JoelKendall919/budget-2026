@@ -63,19 +63,23 @@ You get sync across devices for free on Supabase's free tier.
    Give it your email and a password. (Or use *Email me a link* in the app
    and confirm from your inbox.)
 
-4. **Point the app at the project.** Dashboard → Project Settings → API,
-   then copy the *Project URL* and the *anon public* key into
-   `public/js/config.js`:
+4. **Point the app at the project.** Dashboard → Project Settings → API
+   Keys → **Publishable and secret API keys**. Copy the *Project URL* and
+   the **publishable** key (`sb_publishable_…`) into `public/js/config.js`:
 
    ```js
    supabaseUrl: "https://yourproject.supabase.co",
    supabaseAnonKey: "<your anon public key>",
    ```
 
-   The anon key is *designed* to be public — it's in every browser that
-   loads the page. Row-level security is what actually protects the data, so
-   don't skip step 2. **Never put the `service_role` key anywhere near this
-   repo.**
+   The publishable key is *designed* to be public — it's in every browser
+   that loads the page. Row-level security is what actually protects the
+   data, so don't skip step 2. **Never use the secret key
+   (`sb_secret_…`) here**: it bypasses RLS entirely. The app refuses to
+   start if it finds one, and the deploy workflow refuses to publish.
+
+   Older projects have JWT-style `anon` / `service_role` keys instead,
+   under the *Legacy API keys* tab. Those still work.
 
 5. **Load your existing data.** Sign in, then Data → *Import JSON…* and pick
    `local/budget-data.json`. It uploads on the next save. After that every

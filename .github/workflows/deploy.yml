@@ -52,13 +52,47 @@ jobs:
 
       - name: Guard against committed secrets or personal data
         run: |
-          # The anon key is fine to publish; the service_role key never is.
-          if grep -rIl "service_role" public/ 2>/dev/null; then
-            echo "::error::service_role key found in public/ — aborting."; exit 1
-          fi
-          if [ -f public/budget-data.json ]; then
-            echo "::error::public/budget-data.json would publish your finances — aborting."; exit 1
-          fi
+          python3 - <<'PY'
+          import base64, json, pathlib, re, sys
+
+          # Match key-shaped VALUES, not mentions. config.js legitimately
+          # talks about secret keys in its comments and its own safety
+          # check, and that must not fail the build.
+          SECRET = re.compile(r"sb_secret_[A-Za-z0-9_-]{15,}")
+          JWT    = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.([A-Za-z0-9_-]{10,})\.[A-Za-z0-9_-]{10,}")
+
+          bad = []
+          for f in pathlib.Path("public").rglob("*"):
+              if not f.is_file():
+                  continue
+              try:
+                  text = f.read_text(encoding="utf-8")
+              except (UnicodeDecodeError, OSError):
+                  continue
+
+              if SECRET.search(text):
+                  bad.append(f"{f}: contains an sb_secret_ key")
+
+              # A legacy service_role key is a JWT, so the giveaway is in the
+              # decoded payload rather than the text.
+              for m in JWT.finditer(text):
+                  try:
+                      pad = m.group(1) + "=" * (-len(m.group(1)) % 4)
+                      claims = json.loads(base64.urlsafe_b64decode(pad))
+                  except Exception:
+                      continue
+                  if claims.get("role") == "service_role":
+                      bad.append(f"{f}: contains a service_role JWT")
+
+          if pathlib.Path("public/budget-data.json").exists():
+              bad.append("public/budget-data.json would publish your finances")
+
+          for b in bad:
+              print(f"::error::{b}")
+          if bad:
+              sys.exit("refusing to deploy")
+          print("guard passed: no secret keys or personal data in public/")
+          PY
 
       - uses: actions/configure-pages@v5
 
