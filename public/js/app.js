@@ -1697,6 +1697,18 @@ function renderFirstRun(){
   m.innerHTML=`<div class="head"><h1>Budget 2026</h1></div>`;
   const s=Store.status();
 
+  // A misconfigured project used to fail silently: no sign-in appeared and
+  // the app just looked empty, with nothing saying why. Say why.
+  const cfgErr = (window.BUDGET_CONFIG||{}).configError;
+  if(cfgErr){
+    m.appendChild(el(`<div class="card pad" style="max-width:600px;border-color:#c0392b">
+      <h3 class="sec" style="margin-top:0">Cloud sync isn't set up correctly</h3>
+      <p style="font-size:13px;margin:0 0 10px">${escHTML(cfgErr)}</p>
+      <p class="muted" style="font-size:13px;margin:0">Fix <code>public/js/config.js</code> and reload.
+      Until then your data stays on this device only.</p>
+    </div>`));
+  }
+
   if(s.configured && s.state==="signed-out"){
     const c=el(`<div class="card pad" style="max-width:520px"><h3 class="sec">Sign in</h3></div>`);
     c.appendChild(el(`<p class="muted" style="font-size:13px;margin:0 0 12px">Your budget lives in the cloud, so the numbers match on your phone and your PC.</p>`));
