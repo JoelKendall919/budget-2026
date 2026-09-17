@@ -59,9 +59,27 @@ You get sync across devices for free on Supabase's free tier.
    row-level security, turns on realtime, and sets up daily version
    snapshots.
 
-3. **Create your login.** Dashboard → Authentication → Users → Add user.
-   Give it your email and a password. (Or use *Email me a link* in the app
-   and confirm from your inbox.)
+3. **Create your login.** Dashboard → Authentication → Users → Add user →
+   *Create new user*. Give it your email and a password, and tick **Auto
+   Confirm User** so you don't have to click a confirmation email.
+
+   Then close the door behind you: Authentication → **Sign In / Providers**
+   → *Supabase Auth* tab → **User Signups** → turn off **Allow new users to
+   sign up** → Save changes.
+
+   This matters because `config.js` is committed, so anyone reading this
+   repo has the project URL and publishable key. They still can't touch
+   your data — row-level security sees to that — but without this they
+   could create accounts on your project and eat your free-tier quota.
+
+   To check it worked:
+
+   ```bash
+   curl -s -X POST "https://YOURPROJECT.supabase.co/auth/v1/signup" \
+     -H "apikey: sb_publishable_…" -H "Content-Type: application/json" \
+     -d '{"email":"test@example.com","password":"Str0ngPassw0rd!x"}'
+   # expect: {"code":422,"msg":"Signups not allowed for this instance"}
+   ```
 
 4. **Point the app at the project.** Dashboard → Project Settings → API
    Keys → **Publishable and secret API keys**. Copy the *Project URL* and
