@@ -69,7 +69,7 @@ You get sync across devices for free on Supabase's free tier.
 
    ```js
    supabaseUrl: "https://yourproject.supabase.co",
-   supabaseAnonKey: "eyJhbGciOi...",
+   supabaseAnonKey: "<your anon public key>",
    ```
 
    The anon key is *designed* to be public — it's in every browser that
