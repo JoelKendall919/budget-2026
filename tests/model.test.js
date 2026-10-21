@@ -176,6 +176,34 @@ test("rules are tidied, the longest match wins, and transfers are kept", () => {
   assert.equal(M.ruleFor(rules, "Sainsbury's"), null);
 });
 
+test("income rules only apply to money in, and there they beat a spending rule", () => {
+  const rules = M.normaliseRules([
+    { match: "sainsbury", category: "Groceries" }, { match: "Sainsbury", category: "Salary" },
+    { match: "sainsburys bank", category: "Other" }, { match: "midsummer energy", category: "Salary" },
+  ]);
+  assert.equal(rules.length, 4, "the Salary and Groceries rules for the same text are both kept");
+  assert.equal(M.ruleFor(rules, "SAINSBURYS S/MKTS", "out").category, "Groceries");
+  assert.equal(M.ruleFor(rules, "SAINSBURYS PAYROLL", "in").category, "Salary");
+  assert.equal(M.ruleFor(rules, "SAINSBURYS BANK REFUND", "in").category, "Salary", "an income rule beats a longer spending rule");
+  assert.equal(M.ruleFor(rules, "SAINSBURYS BANK", "out").category, "Other");
+  assert.equal(M.ruleFor(rules, "MIDSUMMER ENERGY L", "out"), null, "money out never picks an income rule");
+  assert.equal(M.ruleFor(rules, "TESCO", "in"), null);
+  assert.equal(M.ruleFor([{ match: "tesco", category: "Groceries" }], "TESCO", "in").category, "Groceries", "a refund");
+});
+
+test("import: the rule, else a Flex bank transfer is savings, else flagged", () => {
+  const doc = { rules: M.normaliseRules([{ match: "joel kendall", category: "Bills" }, { match: "midsummer", category: "Salary" }, { match: "x", transfer: "Flex" }]) };
+  const k = (name, dir, card = "Debit", type = "") => { const r = M.importKind(doc, { name, card }, dir, type); return [r.kind.type, r.kind.category || r.kind.other, r.flagged]; };
+  assert.deepEqual(k("JOEL KENDALL", "out", "Debit", "Transfer to"), ["Spend", "Bills", false], "a rule beats the savings default");
+  assert.deepEqual(k("MIDSUMMER ENERGY L", "in", "Debit", "Bank credit"), ["Income", "Salary", false]);
+  assert.deepEqual(k("REGULAR SAVER", "out", "Debit", "Transfer to"), ["Transfer", "Savings", false]);
+  assert.deepEqual(k("Transfer from 07-04-36 12345678", "in"), ["Transfer", "Savings", false]);
+  assert.deepEqual(k("REGULAR SAVER", "out", "Credit", "Transfer to"), ["Spend", "Other", true], "not on the card");
+  assert.deepEqual(k("ODD SHOP", "out"), ["Spend", "Other", true]);
+  assert.deepEqual(k("ODD PAYER", "in"), ["Income", "Other income", true]);
+  assert.deepEqual(k("XYZ", "out"), ["Spend", "Other", true], "a transfer rule to the row's own account is ignored");
+});
+
 test("what a rule makes of money out and money in", () => {
   assert.deepEqual(M.fromRule({ match: "moneybox", transfer: "Savings" }, "in"), { type: "Transfer", category: null, other: "Savings" });
   assert.deepEqual(M.fromRule({ match: "tesco", category: "Groceries" }, "out"), { type: "Spend", category: "Groceries", other: null });

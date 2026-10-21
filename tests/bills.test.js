@@ -73,6 +73,12 @@ test("a payment is matched on text, account and ±5 days, and the bill shows pai
   assert.equal(late("2026-11-03").diff, 0.59, "paid a little more than expected");
 });
 
+test("a bill with no statement text is never matched automatically, even by its name", () => {
+  const b = bills().map(x => x.id === "phone" ? { ...x, name: "Vodafone", match: "" } : x);
+  const p = item(view(mkDoc(b, [tx("x", "2026-10-29", "VODAFONE LTD", 11.41)]), P1, "2026-11-10"), "phone");
+  assert.equal(p.status, "overdue");
+});
+
 test("two bills with the same match text: closest amount wins before closest date", () => {
   const v = view(mkDoc(), P1, "2026-11-06");
   assert.deepEqual([item(v, "rent").payments[0].id, item(v, "ct").payments[0].id], ["t1", "t2"]);

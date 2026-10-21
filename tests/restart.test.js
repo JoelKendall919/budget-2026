@@ -105,7 +105,7 @@ test("preview: draft bills — this month's amounts, yearly bills, the card remi
     { ...base, id: "claude", name: "Claude", notes: "", match: "anthropic", freq: "monthly", amount: 0, account: "Card", include: false },
     { ...base, id: "bike", name: "Bike", notes: "Novuna Finance", match: "novuna personal fi", freq: "monthly", amount: 197.63, account: "Flex", include: true },
     { ...base, id: "br", name: "BR", notes: "", match: "", freq: "yearly", amount: 75, account: "Flex", include: true },
-    { ...base, id: "water", name: "Water", notes: "Est.", match: "", freq: "yearly", amount: 180, account: "Flex", include: true },
+    { ...base, id: "water", name: "Water", notes: "Est.", match: "water", freq: "yearly", amount: 180, account: "Flex", include: true },
     { ...base, id: "credit-card-repayment", name: "Credit card repayment", notes: "Reminder only: a transfer, not counted in bills",
       match: "member credit card", freq: "monthly", amount: 0, account: "Flex", reminder: true, include: true },
   ]);
@@ -129,8 +129,21 @@ test("preview: a bill's match text and account are the ones seen most often, the
     ],
   };
   const [monthly, yearly] = M.restartPreview(old, START, TODAY).bills;
-  assert.deepEqual([monthly.id, monthly.match, monthly.account, monthly.include], ["water-monthly", "", "Flex", false]);
+  assert.deepEqual([monthly.id, monthly.match, monthly.account, monthly.include], ["water-monthly", "water - monthly", "Flex", false]);
   assert.deepEqual([yearly.id, yearly.match, yearly.account], ["water", "joel kendall", "Flex"]);
+});
+
+test("preview: bills sharing a statement text are linked by hand; no history → the name (4+ letters)", () => {
+  const old = {
+    categories: OLD_CATS, monthlyBudgets: {}, income: [],
+    bills: [{ name: "Rent" }, { name: "Council Tax" }, { name: "Patreon" }, { name: "BR" }], yearlyBills: [],
+    transactions: [
+      tx("r1", "2026-09-01", "JOEL KENDALL", 1050, "Debit", "Bills", { bill: "Rent" }),
+      tx("c1", "2026-09-01", "JOEL KENDALL", 150, "Debit", "Bills", { bill: "Council Tax" }),
+    ],
+  };
+  const m = Object.fromEntries(M.restartPreview(old, START, TODAY).bills.map(b => [b.id, b.match]));
+  assert.deepEqual(m, { rent: "", "council-tax": "", patreon: "patreon", br: "", "credit-card-repayment": "member credit card" });
 });
 
 test("bill ids are slugs of the name, numbered when taken", () => {
@@ -151,7 +164,9 @@ test("preview: standard budget = September × 12/13 to the pound, new names, Sav
 test("rules: renamed, Savings → transfer, card repayment rule added (it wins over an old one)", () => {
   assert.deepEqual(M.restartPreview(oldDoc(), START, TODAY).rules, [
     { match: "member credit card", transfer: "Card" },
+    { match: "midsummer energy", category: "Salary" },
     { match: "regular saver", transfer: "Savings" },
+    { match: "sainsbury", category: "Salary" },
     { match: "uber eats", category: "Eating out" },
     { match: "moneybox", transfer: "Savings" },
     { match: "gymshark", category: "Gifts" },
@@ -163,7 +178,7 @@ test("rules: renamed, Savings → transfer, card repayment rule added (it wins o
     { match: "pay off", category: "Credit" }, { match: "odd", category: "Holiday" }, { match: "x", transfer: "Flex" },
   ]);
   const by = Object.fromEntries(r.map(x => [x.match, x.transfer ? "→" + x.transfer : x.category]));
-  assert.deepEqual(by, { "member credit card": "→Card", "acme payroll": "Salary", nan: "Gifts received", "pay off": "→Card", odd: "Other", x: "→Flex" });
+  assert.deepEqual(by, { "member credit card": "→Card", "midsummer energy": "Salary", sainsbury: "Salary", "acme payroll": "Salary", nan: "Gifts received", "pay off": "→Card", odd: "Other", x: "→Flex" });
 });
 
 test("preview: Other rows are listed for review with what they'd become and the rule's suggestion", () => {

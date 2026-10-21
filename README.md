@@ -58,7 +58,10 @@ dates fall inside it — usually one of each, now and then two.
 
 **Bills.** Each bill is monthly (a due day) or yearly (a date), paid from
 Flex or the card, with *match text* — words from its bank description. A
-matching payment near the due date is linked to it automatically. Tap a bill
+matching payment near the due date is linked to it automatically. Leave the
+match text blank for bills paid with a description they share — e.g. money
+sent to your own "Joel Kendall" account — and link those by hand: tap the
+bill → *Link a payment…* (one payment can cover several bills). Tap a bill
 to link a different payment, mark it paid by hand, skip it this period, or
 change its amount or due date this time only.
 
@@ -79,9 +82,15 @@ payday** moves that period's dates.
 Paying the card off is a transfer from Flex to the card. The purchases on the
 card were the spending, so the repayment isn't. Cash withdrawals are spending.
 
+**Rules.** The longest matching text wins. An income rule (Salary, Gifts
+received, Other income) only applies to money in, and there it beats a
+spending rule — so "sainsbury" is Salary for pay coming in and Groceries for
+shopping going out.
+
 **The restart.** Data → Pay periods → *Restart from payday…* is a one-off
-wizard. It sets the opening balances at the close of 17 Sep, drafts your
-bills and a budget from past spending, asks about any rows it can't classify,
+wizard. It sets the opening balances at the close of 17 Sep, adds Salary
+rules for "midsummer energy" and "sainsbury", drafts your bills (shared
+descriptions left blank to link by hand) and a budget from past spending, asks about any rows it can't classify,
 keeps the rows from payday on and moves everything earlier to an archive copy
 (in the cloud when you're signed in). Until then Bills and Budget ask you to
 run it.
@@ -310,7 +319,10 @@ other**, or the tools will quietly start disagreeing with the app.
 
 1. Download the FlexGraduate CSV and the credit-card CSV.
 2. App → **Import** → set **Card** to match → drop the file → Confirm.
-   Already-logged rows are skipped.
+   Already-logged rows are skipped. Transfers to and from savings on Flex
+   come in as Transfer rows (unless a rule says otherwise, e.g. "joel kendall"
+   → Bills); the card's "payment received" rows don't, as the Flex side
+   already has the repayment.
 3. **Ledger** → check the rows flagged *to review*: give each a type and
    category. The app offers to make a rule, so next time it's automatic.
 4. **Bills** → check each bill has found its payment.

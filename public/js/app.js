@@ -1194,7 +1194,7 @@ function openBillEditor(billId, p){
       fl.appendChild(wizField("Paid from", ac));
     }
     const mt=el(`<input type="text" placeholder="words from the statement line">`); mt.value=f.match; mt.oninput=()=>{ f.match=mt.value; };
-    fl.appendChild(wizField("Statement text (blank: the bill's name)", mt, "wide"));
+    fl.appendChild(wizField("Statement text (blank: link payments by hand)", mt, "wide"));
     const nt=el(`<input type="text" placeholder="optional">`); nt.value=f.notes; nt.oninput=()=>{ f.notes=nt.value; };
     fl.appendChild(wizField("Notes", nt, "wide"));
     const fs=el(`<select></select>`);
@@ -1614,7 +1614,7 @@ function merchantsCard(items){
   const c=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Top merchants</h3></div>`);
   const by={};
   items.forEach(x=>{
-    const rule=Model.ruleFor(DATA.rules, x.row.name);
+    const rule=Model.ruleFor(DATA.rules, x.row.name, "out");
     const key=rule ? rule.match.replace(/\b\w/g,ch=>ch.toUpperCase()) : (x.row.name||"(unnamed)").slice(0,28);
     const g=by[key]=by[key]||{amount:0, rows:new Set(), cats:{}};
     g.amount+=x.amount; g.rows.add(x.row); g.cats[x.category]=(g.cats[x.category]||0)+x.amount;
@@ -1835,7 +1835,7 @@ function wizBillBlock(b){
   }
   const mt=el(`<input type="text" placeholder="words from the statement line">`); mt.value=b.match||"";
   mt.oninput=()=>{ b.match=mt.value; refreshWiz(); };
-  f.appendChild(wizField("Statement text (blank: the bill's name)", mt, "wide"));
+  f.appendChild(wizField("Statement text (blank: link payments by hand)", mt, "wide"));
   const nt=el(`<input type="text" placeholder="optional">`); nt.value=b.notes||"";
   nt.oninput=()=>{ b.notes=nt.value; };
   f.appendChild(wizField("Notes", nt, "wide"));
@@ -1848,7 +1848,7 @@ function wizBillBlock(b){
 // closer amount, then the closer date (Model.billTimeline).
 function wizOverlap(b){
   if(!b.include) return "";
-  const text=x=>String(x.match||x.name||"").trim().toLowerCase(), t=text(b), acc=x=>x.account==="Card"?"Card":"Flex";
+  const text=x=>String(x.match||"").trim().toLowerCase(), t=text(b), acc=x=>x.account==="Card"?"Card":"Flex";
   if(!t) return "";
   const names=wiz.bills.filter(x=>x!==b && x.include && acc(x)===acc(b) && text(x) && (text(x).includes(t)||t.includes(text(x))))
     .map(x=>x.name||"an unnamed bill");
@@ -2072,23 +2072,27 @@ function buildImportPreview(text){
   // even when re-scanning everything.
   const startIso = Model.isRestarted(DATA) ? DATA.meta.startDate : null;
   // Restarted: what each row is comes from the rules (a type and category, or a
-  // transfer); no rule leaves it red as Other / Other income.
-  const typed=(desc, dir, amount, d)=>{
+  // transfer); a bank transfer on Flex is a savings transfer; anything else
+  // with no rule is left red as Other / Other income.
+  const typed=(desc, dir, amount, d, bankType)=>{
     const row={date:iso(d), amount, name:desc, card, flagged:false, confirmed:false};
-    let k=ruleKind(row, dir);
-    if(!k){ row.flagged=true; k = dir==="out" ? {type:"Spend",category:"Other",other:null} : {type:"Income",category:"Other income",other:null}; }
-    return Model.setKind(row, dir, k);
+    const k=Model.importKind(DATA, row, dir, bankType);
+    row.flagged=k.flagged;
+    return Model.setKind(row, dir, k.kind);
   };
+  // Restarted, Flex: your own transfers (savings) come in too.
+  const keepTransfers = !!startIso && card==="Debit";
   rows.forEach(r=>{
     if(startIso && iso(r.date)<startIso){beforeStart++;return;}
     if(cutoff && r.date<=cutoff){beforeCut++;return;}
-    if(SKIP_RE.test(r.desc)||SKIP_TYPE_RE.test(r.type)){skipped++;return;}
+    const own = keepTransfers && (Model.SAVER_RE.test(r.desc)||Model.SAVER_RE.test(r.type));
+    if(!own && (SKIP_RE.test(r.desc)||SKIP_TYPE_RE.test(r.type))){skipped++;return;}
     if(r.out>0){ if(takeMatch(txKeys,r.date,r.out)){dupes++;return;}
-      if(startIso){ newTx.push(typed(r.desc,"out",r.out,r.date)); return; }
+      if(startIso){ newTx.push(typed(r.desc,"out",r.out,r.date,r.type)); return; }
       const cat=categorise(r.desc);
       newTx.push({date:iso(r.date),amount:r.out,name:r.desc,category:cat||"Other",card,flagged:!cat,confirmed:false}); }
     else if(r.in>0){ if(takeMatch(incKeys,r.date,r.in)){dupes++;return;}
-      if(startIso){ newInc.push(typed(r.desc,"in",r.in,r.date)); return; }
+      if(startIso){ newInc.push(typed(r.desc,"in",r.in,r.date,r.type)); return; }
       const src=categorise(r.desc);
       newInc.push({date:iso(r.date),amount:r.in,name:r.desc,source:src||"Other",card,flagged:!src,confirmed:false}); }
   });
@@ -2100,7 +2104,7 @@ function renderImportPreview(){
   const out=document.getElementById("impOut"); out.innerHTML="";
   const stats=el(`<div class="grid kpis" style="margin:14px 0">
     ${kpiHTML("Statement rows",total)}${kpiHTML(startIso?"New money out":"New spend",newTx.length)}${kpiHTML(startIso?"New money in":"New income",newInc.length)}
-    ${kpiHTML("Already in",dupes)}${kpiHTML("Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}
+    ${kpiHTML("Already in",dupes)}${kpiHTML(startIso?"Skipped":"Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}
     ${startIso?kpiHTML("Before "+Periods.fmt(startIso),beforeStart):""}</div>`);
   out.appendChild(stats);
   if(startIso && beforeStart) out.appendChild(el(`<div class="muted" style="font-size:12px;margin:-4px 0 12px">${beforeStart} row${beforeStart===1?"":"s"} dated before ${Periods.fmtY(startIso)} ignored — the budget restarted from that payday, so earlier rows stay in the archive.</div>`));
@@ -2203,13 +2207,13 @@ function applyRulePick(rule, v){
 }
 // What the rules make of a row, or null (no rule, or a transfer to its own account).
 function ruleKind(t, dir){
-  const k=Model.fromRule(Model.ruleFor(DATA.rules, t.name), dir, DATA);
+  const k=Model.fromRule(Model.ruleFor(DATA.rules, t.name, dir), dir, DATA);
   return k && !(k.type==="Transfer" && k.other===Model.accountOf(t)) ? k : null;
 }
 function renderRules(m){
   const typed=Model.isRestarted(DATA);
   m.innerHTML="";
-  m.appendChild(el(`<div class="head"><h1>Rules</h1><span class="sub">${DATA.rules.length} rules · ${typed?"a description containing the text gets the category or transfer":"a merchant name containing the text gets the category"}</span></div>`));
+  m.appendChild(el(`<div class="head"><h1>Rules</h1><span class="sub">${DATA.rules.length} rules · ${typed?"a description containing the text gets the category or transfer; income rules (e.g. Salary) only apply to money in":"a merchant name containing the text gets the category"}</span></div>`));
   // add form
   const add=el(`<div class="card pad flex wrap" style="gap:10px;margin-bottom:14px">
      <input type="text" id="rMatch" placeholder="merchant contains… e.g. tesco" style="flex:1;min-width:160px">
@@ -2220,10 +2224,10 @@ function renderRules(m){
   add.querySelector("#rAdd").onclick=()=>{const v=add.querySelector("#rMatch").value.trim().toLowerCase();if(!v)return;
     DATA.rules.push(typed ? applyRulePick({match:v}, rc.value) : {match:v,category:rc.value});DATA.rules=dedupeRules(DATA.rules);markDirty();renderRules(m);};
   m.appendChild(add);
-  // counts
-  const counts={}; DATA.rules.forEach(r=>counts[r.match]=0);
-  const count=t=>{const r=ruleFor(t.name);if(r)counts[r.match]=(counts[r.match]||0)+1;};
-  DATA.transactions.forEach(count); if(typed) (DATA.income||[]).forEach(count);
+  // counts (restarted: by direction, so "sainsbury" for Salary and for Groceries count apart)
+  const counts=new Map();
+  const count=dir=>t=>{const r=typed?Model.ruleFor(DATA.rules,t.name,dir):ruleFor(t.name);if(r)counts.set(r,(counts.get(r)||0)+1);};
+  DATA.transactions.forEach(count("out")); if(typed) (DATA.income||[]).forEach(count("in"));
   const c=el(`<div class="card"></div>`);
   const w=el(`<div class="tablewrap"><table><thead><tr><th>Merchant contains</th><th>${typed?"Category / transfer":"Category"}</th><th class="num">Matches</th><th></th></tr></thead><tbody></tbody></table></div>`);
   const tb=w.querySelector("tbody");
@@ -2235,7 +2239,7 @@ function renderRules(m){
     else if(r.transfer){ td.appendChild(el(`<span class="chip">Transfer · ${escHTML(kindText("out",{type:"Transfer",other:r.transfer}))}</span>`)); tr.appendChild(td); }
     else { const s=el(`<select class="sel-cat"></select>`);DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;o.selected=c===r.category;s.appendChild(o);});
       s.onchange=()=>{r.category=s.value;markDirty();};td.appendChild(s);tr.appendChild(td); }
-    tr.appendChild(el(`<td class="num muted">${counts[r.match]||0}</td>`));
+    tr.appendChild(el(`<td class="num muted">${counts.get(r)||0}</td>`));
     const td2=el(`<td class="right"></td>`);const del=el(`<button class="btn sm danger">✕</button>`);del.onclick=()=>{DATA.rules.splice(i,1);markDirty();renderRules(m);};td2.appendChild(del);tr.appendChild(td2);
     tb.appendChild(tr);
   });

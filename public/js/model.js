@@ -127,21 +127,30 @@
 
   /* ======================= rules ======================= */
   // A rule is {match, category} or {match, transfer: "Savings" | "Card" | "Flex"}.
-  // Matches are lower-case and the longest match wins.
+  // Matches are lower-case and the longest match wins. A rule for an income
+  // category (Salary…) only applies to money in, and there it beats any other
+  // rule; so "sainsbury" can be Salary for money in and Groceries for money
+  // out, as two rules with the same text.
+  const isIncomeRule = r => !!r && !r.transfer && INCOME_CATS.includes(r.category);
   function normaliseRules(rules) {
     const seen = new Set(), out = [];
     (rules || []).forEach(r => {
       const match = String((r && r.match) || "").trim().toLowerCase();
-      if (!match || seen.has(match)) return;
-      seen.add(match);
+      const key = match + (isIncomeRule(r) ? "|in" : "");
+      if (!match || seen.has(key)) return;
+      seen.add(key);
       if (r.transfer) out.push({ match, transfer: r.transfer });
       else out.push({ match, category: r.category || "Other" });
     });
     return out.sort((a, b) => b.match.length - a.match.length);
   }
-  function ruleFor(rules, text) {
+  // The rule for a description; with `dir` ("out" / "in"), as above.
+  function ruleFor(rules, text, dir) {
     const d = String(text || "").toLowerCase();
-    return (rules || []).find(r => r.match && d.includes(r.match)) || null;
+    const hits = (rules || []).filter(r => r.match && d.includes(r.match));
+    if (dir === "out") return hits.find(r => !isIncomeRule(r)) || null;
+    if (dir === "in") return hits.find(isIncomeRule) || hits[0] || null;
+    return hits[0] || null;
   }
   // What a rule makes of a row in a given direction: {type, category, other}.
   function fromRule(rule, dir, doc) {
@@ -150,6 +159,21 @@
     if (incomeCats(doc).includes(rule.category))
       return dir === "in" ? { type: "Income", category: rule.category, other: null } : { type: "Spend", category: "Other", other: null };
     return { type: dir === "in" ? "Refund" : "Spend", category: rule.category, other: null };
+  }
+  // Bank rows moving money between your own accounts ("Transfer to/from" in
+  // the statement's type column, or "… saver" in the description).
+  const SAVER_RE = /transfer to|transfer from|to saver|from saver/i;
+  // What an imported row is, from the rules: {kind, flagged}. On Flex, a
+  // bank transfer no rule recognises is a transfer to / from savings; any
+  // other row with no rule is Other / Other income, flagged for review. A
+  // rule naming the row's own account is ignored.
+  function importKind(doc, row, dir, bankType) {
+    const rule = ruleFor(doc.rules, row.name, dir);
+    const k = fromRule(rule, dir, doc);
+    if (k && !(k.type === "Transfer" && k.other === accountOf(row))) return { kind: k, flagged: false };
+    if (accountOf(row) === "Flex" && (SAVER_RE.test(row.name || "") || SAVER_RE.test(bankType || "")))
+      return { kind: { type: "Transfer", category: null, other: "Savings" }, flagged: false };
+    return { kind: dir === "out" ? { type: "Spend", category: "Other", other: null } : { type: "Income", category: "Other income", other: null }, flagged: true };
   }
   // Write a classification onto a row (type + category, or type + to/from).
   function setKind(row, dir, kind) {
@@ -214,7 +238,9 @@
   const startOf = doc => (doc && doc.meta && doc.meta.startDate) || P.normCycle(cycleOf(doc)).anchor;
   const maxIso = (a, b) => (a > b ? a : b);
   const sortedVersions = bill => (bill.versions || []).slice().sort((a, b) => a.from.localeCompare(b.from));
-  const matchTextOf = bill => String(bill.match || bill.name || "").trim().toLowerCase();
+  // Blank match text: payments are linked by hand (e.g. bills paid through
+  // your own account, where one description fits several bills).
+  const matchTextOf = bill => String(bill.match || "").trim().toLowerCase();
   const hasOverride = ov => !!ov && Object.keys(ov).some(k => ov[k] != null);
   const num = v => (v == null || v === "" || !isFinite(+v) ? null : +v);
 
@@ -661,6 +687,8 @@
   // saved as is). Nothing here changes the old document.
   const RESTART_DROPS = ["bills", "yearlyBills", "monthlyBudgets", "billOverrides", "budgets", "budgetDefault"];
   const CARD_RULE = { match: "member credit card", transfer: "Card" };
+  // Who pays your salary (income rules only apply to money in).
+  const SALARY_RULES = [{ match: "midsummer energy", category: "Salary" }, { match: "sainsbury", category: "Salary" }];
   const clone = x => JSON.parse(JSON.stringify(x));
   const kept = (rows, start) => (rows || []).filter(r => r.date >= start);
   const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "bill";
@@ -676,7 +704,7 @@
 
   // Rules with the new names: Savings → transfer to/from savings, Credit →
   // card repayment, old categories renamed (old rules were for spending, so
-  // "Gifts" stays a spending category); plus the card-repayment rule.
+  // "Gifts" stays a spending category); plus the card-repayment and salary rules.
   function restartRules(rules) {
     const out = (rules || []).map(r => {
       if (!r || r.transfer) return r;
@@ -686,7 +714,7 @@
       if (!SPEND_CATS.includes(c) && !OLD_SPEND[c] && (INCOME_CATS.includes(c) || OLD_INCOME[c])) return { match: r.match, category: newIncomeCat(c) };
       return { match: r.match, category: newSpendCat(c) };
     });
-    return normaliseRules([CARD_RULE].concat(out));
+    return normaliseRules([CARD_RULE].concat(SALARY_RULES, out));
   }
 
   // What the old Reconcile tab linked to each bill: the description and
@@ -712,16 +740,25 @@
   // Bills to set up: the monthly bills at this month's amounts (or the
   // latest month budgeted), the yearly bills, and the card-repayment
   // reminder. Due dates are left for you to fill in; £0 bills start unticked.
+  // Match text is the description seen before, or the bill's name; it's left
+  // blank (link by hand) when several bills were paid with the same
+  // description, e.g. money sent to your own account.
   function draftBills(old, start, today) {
     const mb = old.monthlyBudgets || {}, cur = (today || start).slice(0, 7);
     const months = Object.keys(mb).sort();
     const month = months.filter(m => m <= cur).pop() || months[0];
     const amounts = (month && mb[month] && mb[month].bills) || {};
     const history = billHistory(old), out = [];
+    const uses = {};
+    (old.bills || []).concat(old.yearlyBills || []).forEach(b => {
+      const m = (history[b.name] || {}).match; if (m) uses[m] = (uses[m] || 0) + 1;
+    });
     const add = (b, freq, amount) => {
       const h = history[b.name] || {};
+      const name = String(b.name || "").trim().toLowerCase();
+      const match = h.match ? (uses[h.match] > 1 ? "" : h.match) : (name.length >= 4 ? name : "");
       out.push({
-        id: newBillId(b.name, out), name: b.name, notes: b.notes || "", match: h.match || "",
+        id: newBillId(b.name, out), name: b.name, notes: b.notes || "", match,
         freq, amount: round2(amount), dueDay: null, dueDate: null, account: h.account || "Flex",
         reminder: false, include: round2(amount) > 0,
       });
@@ -764,7 +801,7 @@
     [["out", kept(old.transactions, start)], ["in", kept(old.income, start)]].forEach(([dir, rows]) => rows.forEach(row => {
       if (!needsReview(row, dir)) return;
       const now = classify(convertRow(row, dir, cats), dir);
-      review.push({ dir, id: row.id, row, now, suggestion: fromRule(ruleFor(rules, row.name), dir, ruleDoc) });
+      review.push({ dir, id: row.id, row, now, suggestion: fromRule(ruleFor(rules, row.name, dir), dir, ruleDoc) });
     }));
     const count = (rows, k) => (rows || []).length - k;
     const keptOut = kept(old.transactions, start).length, keptIn = kept(old.income, start).length;
@@ -894,7 +931,7 @@
     TYPES, SPEND_CATS, INCOME_CATS, TRANSFER_ACCOUNTS, OLD_SPEND, OLD_INCOME,
     accountOf, isRestarted, spendCats, incomeCats, round2,
     classify, effects, ledger, balances,
-    normaliseRules, ruleFor, fromRule, setKind,
+    normaliseRules, ruleFor, fromRule, setKind, SAVER_RE, importKind,
     newSpendCat, newIncomeCat, convertRow, needsReview,
     MATCH_DAYS, OVERDUE_DAYS, cycleOf, startOf,
     billVersion, billOccurrences, billTimeline, billStatus, describeBill, periodBills, billPaymentIds,

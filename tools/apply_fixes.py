@@ -31,6 +31,7 @@ taken first.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 import time
@@ -113,43 +114,72 @@ def classify(missing: list[StatementRow], extra: list[dict], window: int):
 # --------------------------------------------------------------------------
 
 
-def rule_for(doc: Doc, text: str) -> dict | None:
-    """The app's merchant rule for a description (longest match first, as the app does)."""
-    t = (text or "").lower()
-    for r in sorted(doc.raw.get("rules", []), key=lambda r: -len(r.get("match", ""))):
-        m = (r.get("match") or "").lower()
-        if m and m in t:
-            return r
-    return None
-
-
 INCOME_CATS = ("Salary", "Gifts received", "Other income")
+SAVER_RE = re.compile(r"transfer to|transfer from|to saver|from saver", re.I)
 
 
-def kind_for(doc: Doc, rule: dict | None, out: bool) -> tuple[str, str | None, str | None]:
+def _income_cats(doc: Doc) -> tuple:
+    return tuple(doc.raw.get("incomeCategories") or INCOME_CATS)
+
+
+def rule_for(doc: Doc, text: str, out: bool | None = None) -> dict | None:
     """
-    (type, category, transfer account) for a new row in a restarted budget,
-    as the app's import does it (model.js fromRule). With no rule: Spend in
-    Other, or Income in Other income.
+    The app's rule for a description (longest match first, as model.js
+    ruleFor does). Income rules (e.g. "sainsbury" → Salary) only apply to money
+    in, and there they beat spending rules with the same text.
+    """
+    t = (text or "").lower()
+    hits = [r for r in sorted(doc.raw.get("rules", []), key=lambda r: -len(r.get("match", "")))
+            if (r.get("match") or "").lower() and (r.get("match") or "").lower() in t]
+    is_income = lambda r: not r.get("transfer") and r.get("category") in _income_cats(doc)
+    if out is True:
+        return next((r for r in hits if not is_income(r)), None)
+    if out is False:
+        return next((r for r in hits if is_income(r)), hits[0] if hits else None)
+    return hits[0] if hits else None
+
+
+def kind_for(doc: Doc, rule: dict | None, out: bool) -> tuple[str, str | None, str | None] | None:
+    """
+    (type, category, transfer account) from a rule, as model.js fromRule does
+    it; None with no rule.
     """
     if not rule:
-        return ("Spend", "Other", None) if out else ("Income", "Other income", None)
+        return None
     if rule.get("transfer"):
         return "Transfer", None, rule["transfer"]
     cat = rule.get("category") or "Other"
-    if cat in (doc.raw.get("incomeCategories") or INCOME_CATS):
+    if cat in _income_cats(doc):
         return ("Spend", "Other", None) if out else ("Income", cat, None)
     return ("Spend" if out else "Refund"), cat, None
 
 
-def describe_add(doc: Doc, r: StatementRow) -> str:
-    rule = rule_for(doc, r.description)
+def import_kind(doc: Doc, r: StatementRow, card: str) -> tuple[tuple, bool]:
+    """
+    ((type, category, transfer account), flagged) for a new row in a restarted
+    budget, as model.js importKind does it: the rule; else a bank transfer on
+    Flex is a savings transfer; else Spend in Other or Income in Other income,
+    flagged for review.
+    """
+    out = r.paid_out > 0
+    acc = "Card" if card == "Credit" else "Flex"
+    k = kind_for(doc, rule_for(doc, r.description, out), out)
+    if k and not (k[0] == "Transfer" and k[2] == acc):
+        return k, False
+    if acc == "Flex" and (SAVER_RE.search(r.description or "") or SAVER_RE.search((r.raw or {}).get("type") or "")):
+        return ("Transfer", None, "Savings"), False
+    return (("Spend", "Other", None) if out else ("Income", "Other income", None)), True
+
+
+def describe_add(doc: Doc, r: StatementRow, card: str) -> str:
     if doc.start_date:
-        kind, cat, other = kind_for(doc, rule, r.paid_out > 0)
+        (kind, cat, other), flagged = import_kind(doc, r, card)
         text = f"{kind} {'to' if r.paid_out > 0 else 'from'} {other}" if kind == "Transfer" else f"{kind} · {cat}"
     else:
+        rule = rule_for(doc, r.description)
+        flagged = rule is None
         text = (rule or {}).get("category") or "Other"
-    return text if rule else text + " (needs review)"
+    return text + " (needs review)" if flagged else text
 
 
 def apply_move(row: dict, target: StatementRow) -> None:
@@ -165,20 +195,20 @@ def apply_delete(doc: Doc, row: dict) -> None:
 def apply_add(doc: Doc, r: StatementRow, card: str, n: int) -> dict:
     new_id = f"fix{int(time.time())}_{n}"
     out = r.paid_out > 0
-    rule = rule_for(doc, r.description)
     row = {
         "id": new_id, "date": r.date, "amount": money(r.paid_out if out else r.paid_in),
-        "name": r.description, "card": card,
-        "flagged": rule is None, "confirmed": False,
+        "name": r.description, "card": card, "flagged": False, "confirmed": False,
     }
     if doc.start_date:
-        kind, cat, other = kind_for(doc, rule, out)
+        (kind, cat, other), row["flagged"] = import_kind(doc, r, card)
         row["type"] = kind
         if kind == "Transfer":
             row["to" if out else "from"] = other
         else:
             row["category"] = cat
     else:
+        rule = rule_for(doc, r.description)
+        row["flagged"] = rule is None
         row["category" if out else "source"] = (rule or {}).get("category") or "Other"
     doc.raw["transactions" if out else "income"].append(row)
     return row
@@ -235,7 +265,7 @@ def main() -> int:
     if adds:
         print(f"{GRN}{BOLD}Add — on the statement, missing from the app{OFF}")
         for m in adds:
-            print(f"  {m.date}  {m.delta:>9.2f}  {m.description[:44]}  {DIM}→ {describe_add(doc, m)}{OFF}")
+            print(f"  {m.date}  {m.delta:>9.2f}  {m.description[:44]}  {DIM}→ {describe_add(doc, m, st.account_type)}{OFF}")
         print()
 
     # -- what the balance will be afterwards -------------------------------
