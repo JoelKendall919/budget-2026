@@ -340,7 +340,10 @@
         .on("postgres_changes",
           { event: "UPDATE", schema: "public", table: "budget_documents", filter: `user_id=eq.${Store.user.id}` },
           (payload) => {
-            const rev = payload.new && payload.new.revision;
+            // The channel can only filter on one column, so archive documents
+            // (other doc_keys) arrive here too — never let one replace the live budget.
+            if (!payload.new || payload.new.doc_key !== CFG.docKey) return;
+            const rev = payload.new.revision;
             if (!rev || rev === Store.revision) return;   // our own write echoing back
             if (Store.hasPendingWrite) return;            // we're mid-edit; poll/conflict will sort it
             Store.revision = rev;
