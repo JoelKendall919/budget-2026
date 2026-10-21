@@ -721,20 +721,27 @@
     return !!m && +m[1] >= 1 && +m[1] <= 12 && +m[2] >= 1 && +m[2] <= P.daysInMonth(2024, +m[1]);
   };
   const validDueDay = d => num(d) != null && Number.isInteger(+d) && +d >= 1 && +d <= 31;
+  // What's wrong with a bill as typed — {name, amount, freq, dueDay or
+  // dueDate, account} — as messages; [] when it's fine.
+  function billProblems(b) {
+    const out = [], name = String(b.name || "").trim(), n = name || "A bill";
+    if (!name) out.push("A bill has no name.");
+    if (num(b.amount) == null || +b.amount < 0) out.push(n + ": amount needs a number.");
+    if (b.freq === "yearly") { if (!validDueDate(b.dueDate)) out.push(n + ": set the due date (day and month)."); }
+    else if (b.freq === "monthly") { if (!validDueDay(b.dueDay)) out.push(n + ": set the due day (1–31)."); }
+    else out.push(n + ": monthly or yearly?");
+    if (b.account !== "Flex" && b.account !== "Card") out.push(n + ": paid from Flex or the card?");
+    return out;
+  }
   function restartProblems(choices) {
     const out = [], c = choices || {}, o = c.openings || {};
     if (num(o.flex) == null) out.push("Opening Flex balance needs a number.");
     if (num(o.card) == null) out.push("Opening card balance needs a number.");
     const ids = new Set();
     (c.bills || []).filter(b => b.include).forEach(b => {
-      const name = String(b.name || "").trim(), n = name || "A bill";
-      if (!name) out.push("A bill has no name.");
+      const n = String(b.name || "").trim() || "A bill";
       if (ids.has(b.id)) out.push(n + ": two bills have the same id."); else ids.add(b.id);
-      if (num(b.amount) == null || +b.amount < 0) out.push(n + ": amount needs a number.");
-      if (b.freq === "yearly") { if (!validDueDate(b.dueDate)) out.push(n + ": set the due date (day and month)."); }
-      else if (b.freq === "monthly") { if (!validDueDay(b.dueDay)) out.push(n + ": set the due day (1–31)."); }
-      else out.push(n + ": monthly or yearly?");
-      if (b.account !== "Flex" && b.account !== "Card") out.push(n + ": paid from Flex or the card?");
+      out.push(...billProblems(b));
     });
     Object.keys(c.review || {}).forEach(k => {
       const v = c.review[k] || {}, dir = k.split(":")[0];
@@ -829,10 +836,10 @@
     normaliseRules, ruleFor, fromRule, setKind,
     newSpendCat, newIncomeCat, convertRow, needsReview,
     MATCH_DAYS, OVERDUE_DAYS, cycleOf, startOf,
-    billVersion, billOccurrences, billTimeline, billStatus, periodBills, billPaymentIds,
+    billVersion, billOccurrences, billTimeline, billStatus, describeBill, periodBills, billPaymentIds,
     changeBillFrom, endBillFrom, overrideBill,
     rowPeriodKey, budgetFor, setBudget, resetBudget, setPay, setPayday,
     periodFlows, payFor, periodBudget, untilPayday,
-    newBillId, restartRules, restartPreview, restartProblems, restartDoc, tidyDoc,
+    newBillId, billProblems, restartRules, restartPreview, restartProblems, restartDoc, tidyDoc,
   };
 });

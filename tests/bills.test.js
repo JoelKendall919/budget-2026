@@ -193,3 +193,16 @@ test("switching a bill to yearly clears its due day", () => {
   assert.deepEqual(v, { from: "2026-10-16", amount: 120, freq: "yearly", account: "Flex", dueDate: "11-01" });
   assert.deepEqual(item(view(mkDoc(b, []), P1, "2026-10-20"), "phone").slot, "2026");
 });
+
+test("billProblems: the bill editor's checks", () => {
+  const ok = { name: "Phone", amount: 11.41, freq: "monthly", dueDay: 21, account: "Flex" };
+  assert.deepEqual(M.billProblems(ok), []);
+  assert.deepEqual(M.billProblems({ ...ok, freq: "yearly", dueDay: null, dueDate: "03-15", account: "Card" }), []);
+  assert.equal(M.billProblems({ ...ok, name: " " })[0], "A bill has no name.");
+  assert.match(M.billProblems({ ...ok, amount: "" })[0], /amount/);
+  assert.match(M.billProblems({ ...ok, amount: -1 })[0], /amount/);
+  assert.match(M.billProblems({ ...ok, dueDay: 32 })[0], /due day/);
+  assert.match(M.billProblems({ ...ok, freq: "yearly", dueDate: "02-30" })[0], /due date/);
+  assert.match(M.billProblems({ ...ok, freq: "weekly" })[0], /monthly or yearly/);
+  assert.match(M.billProblems({ ...ok, account: "Savings" })[0], /Flex or the card/);
+});
