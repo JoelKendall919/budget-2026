@@ -163,10 +163,13 @@ function markDirty(){ dirty=true; refreshSaveIndicator(); scheduleSave(); }
 let saveTimer=null;
 function scheduleSave(){ clearTimeout(saveTimer); saveTimer=setTimeout(persist, 400); }
 async function persist(){
+  saveTimer=null;
   if(!DATA) return;
   Store.save(DATA);
   refreshSaveIndicator();
 }
+// Hand an edit still waiting out the debounce to the store straight away.
+function flushAppSave(){ if(saveTimer){ clearTimeout(saveTimer); persist(); } }
 function refreshSaveIndicator(){
   const dot=document.getElementById("saveDot"), t=document.getElementById("saveText");
   const fl=document.getElementById("fileLabel");
@@ -204,12 +207,11 @@ function shortTime(iso){
   }catch(e){ return ""; }
 }
 // Keep the footer indicator honest as the store changes state in the background.
-Store.on("status",()=>{ if(!Store.hasPendingWrite) dirty=false; refreshSaveIndicator(); });
+Store.on("status",()=>{ if(!Store.hasPendingWrite) dirty=false; refreshSaveIndicator(); if(view==="restart") refreshWiz(); });
 
 /* ---------- load ---------- */
 function migrate(d){
   d.categories = d.categories||[];
-  d.rules = dedupeRules(d.rules||[]);
   // confirmed defaults to true for anything already in the file (historical, already
   // reviewed). Imports set confirmed:false explicitly, which the spread preserves.
   d.transactions = (d.transactions||[]).map((t,i)=>({confirmed:true,flagged:false,card:"Debit",...t,id:t.id||("t"+i)}));
@@ -225,6 +227,16 @@ function migrate(d){
   d.accounts.cash = d.accounts.cash || {n50:0,n20:0,n10:0,n5:0,coins:0};   // notes counted; coins as one amount
   d.accounts.cash.coins = +d.accounts.cash.coins || 0;   // added later - backfill on existing data
   d.wealthSnapshots = d.wealthSnapshots || [];   // [{date,savings,cash}] - one per day, recorded on open/Accounts visit
+
+  // A budget restarted from a payday (pay periods, Bills and Budget tabs):
+  // fill in anything missing, and undo what an older copy of the app may
+  // have done to it (see Model.tidyDoc). Repairs are saved once loaded.
+  if(Model.isRestarted(d)){
+    const {notes}=Model.tidyDoc(d);
+    if(notes.length) setTimeout(()=>{ if(DATA===d){ toast(notes.join(" ")); markDirty(); } },0);
+    return d;
+  }
+  d.rules = dedupeRules(d.rules||[]);
 
   // ---- one-time migration: budgetDefault/budgets/billOverrides + bills(amount,frequency)
   // -> DATA.monthlyBudgets (every month fully independent, no default/override chain)
@@ -256,12 +268,8 @@ function migrate(d){
   d.bills = d.bills||[];
   return d;
 }
-function dedupeRules(rules){
-  const seen=new Set(); const out=[];
-  for(const r of rules){ const k=(r.match||"").toLowerCase(); if(!k||seen.has(k))continue; seen.add(k); out.push({match:k,category:r.category}); }
-  out.sort((a,b)=>b.match.length-a.match.length);
-  return out;
-}
+// Lower-case, no duplicates, longest match first; transfer rules keep their transfer.
+function dedupeRules(rules){ return Model.normaliseRules(rules); }
 async function boot(){
   await Store.init();
   const {doc} = await Store.load();
@@ -355,12 +363,14 @@ function recordWealthSnapshot(){
 /* ============================ RENDER ==================================== */
 function render(){
   refreshSaveIndicator();
-  document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active",b.dataset.view===view));
+  const navView = view==="restart" ? "data" : view;
+  document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active",b.dataset.view===navView));
   const m=document.getElementById("main");
   if(!DATA){ renderFirstRun(); return; }
   updateBadges();
-  ({dashboard:renderDashboard,ledger:renderLedger,transactions:renderLedger,income:renderLedger,budget:renderBudget,
-    budgets:renderBudget,bills:renderBudget,import:renderImport,rules:renderRules,accounts:renderAccounts,data:renderData}[view]||renderDashboard)(m);
+  ({dashboard:renderDashboard,ledger:renderLedger,transactions:renderLedger,income:renderLedger,
+    bills:renderBills,budget:renderBudgetTab,budgets:renderBudgetTab,restart:renderRestart,
+    import:renderImport,rules:renderRules,accounts:renderAccounts,data:renderData}[view]||renderDashboard)(m);
 }
 function updateBadges(){
   const e=document.getElementById("badge-ledger"); if(!e) return;
@@ -392,6 +402,7 @@ function periodControls(onchange){
 
 /* ---------- DASHBOARD ---------- */
 function renderDashboard(m){
+  if(Model.isRestarted(DATA)) return renderPaydayDashboard(m);
   const tx=DATA.transactions.filter(t=>txInPeriod(t)&&isSpend(t));
   const inc=DATA.income.filter(txInPeriod);
   const catFilter = txFilter.cat;
@@ -875,6 +886,383 @@ function offerRule(name,cat){
   }
 }
 
+/* ---------- PAY PERIODS: restart wizard, payday dashboard ----------
+   The budget restarts once, from a payday, into four-weekly pay periods
+   (docs/plans/pay-period-budgeting.md 3.6). Until then the Bills and
+   Budget tabs only point at the restart. */
+const RESTART_START = Periods.DEFAULT_CYCLE.anchor;
+let wiz = null;   // the restart wizard's choices while it's being filled in
+
+function needsRestart(m, title){
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>${title}</h1></div>`));
+  const c=el(`<div class="card pad" style="max-width:640px"><h3 class="sec">Run the restart first</h3>
+    <p style="margin:0 0 8px">Bills and Budget work in pay periods: from one payday to the day before the next, every four weeks, starting with your payday on <b>${Periods.fmtY(RESTART_START)}</b>.</p>
+    <p class="muted" style="font-size:13px;margin:0 0 12px">The restart sets up your bills and a budget per pay period, keeps the rows from that payday on and archives everything earlier. Ledger, Import and Accounts work as normal until then.</p></div>`);
+  const b=el(`<button class="btn pri">Open the restart</button>`); b.onclick=()=>{ view="restart"; render(); };
+  c.appendChild(b); m.appendChild(c);
+}
+function renderBills(m){
+  if(!Model.isRestarted(DATA)) return needsRestart(m,"Bills");
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Bills</h1></div>`));
+  m.appendChild(el(`<div class="card empty">Each pay period's bills will show here.</div>`));
+}
+function renderBudgetTab(m){
+  if(!Model.isRestarted(DATA)) return needsRestart(m,"Budget");
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Budget</h1></div>`));
+  m.appendChild(el(`<div class="card empty">Each pay period's budget will show here.</div>`));
+}
+
+// Dashboard once restarted: what's safe to spend until payday.
+function renderPaydayDashboard(m){
+  const today=Periods.localISO(), u=Model.untilPayday(DATA, today);
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Dashboard</h1><span class="sub">pay period ${Periods.label(u.period)}</span></div>`));
+  const last=[...DATA.transactions,...DATA.income].reduce((a,r)=>r.date>a?r.date:a,"");
+  if(!last || Periods.diffDays(last,today)>7){
+    m.appendChild(el(`<div class="banner" style="margin-bottom:14px">${last?`The ledger runs to ${Periods.fmt(last)}`:`Nothing in the ledger since ${Periods.fmt(DATA.meta.startDate)} yet`} — import your latest statements so these numbers are up to date.</div>`));
+  }
+  const k=el(`<div class="grid kpis"></div>`);
+  k.appendChild(kpi("Safe to spend", money(u.safe), money(u.perDay)+" a day until payday", u.safe<0?"bad":"good"));
+  k.appendChild(kpi("Payday", Periods.fmt(u.period.next), u.daysLeft===1?"tomorrow":"in "+u.daysLeft+" days"));
+  k.appendChild(kpi("Flex balance", money(u.flex), "current account", u.flex<0?"bad":""));
+  k.appendChild(kpi("Card owed", money(u.cardOwed), u.card>0?"in credit by "+money(u.card):"credit card"));
+  k.appendChild(kpi("Bills still due", money(u.billsDue), u.bills.length===1?"1 bill before payday":u.bills.length+" bills before payday"));
+  m.appendChild(k);
+
+  const c=el(`<div class="card pad" style="margin-top:14px;max-width:760px"><h3 class="sec">Bills before payday</h3></div>`);
+  if(!u.bills.length) c.appendChild(el(`<div class="muted" style="font-size:13px">Nothing left to pay before ${Periods.fmt(u.period.next)}.</div>`));
+  else {
+    const w=el(`<div class="tablewrap fit"><table><thead><tr><th>Bill</th><th>Due</th><th class="num">Expected</th><th>Status</th></tr></thead><tbody></tbody></table></div>`);
+    const tb=w.querySelector("tbody");
+    u.bills.forEach(i=>{
+      const tr=el(`<tr><td></td><td class="muted" style="white-space:nowrap">${Periods.fmt(i.date)}</td><td class="num">${money(i.expected)}</td><td></td></tr>`);
+      tr.children[0].textContent=i.bill.name+((i.version||{}).account==="Card"?" · card":"");
+      const st = i.status==="overdue" ? ["bad", (-i.daysUntil)+" days late"]
+               : i.status==="due" ? ["warn", i.daysUntil===0?"due today":"due yesterday"]
+               : ["", i.daysUntil===1?"tomorrow":"in "+i.daysUntil+" days"];
+      tr.children[3].appendChild(el(`<span class="status ${st[0]}">${st[1]}</span>`));
+      tb.appendChild(tr);
+    });
+    c.appendChild(w);
+  }
+  m.appendChild(c);
+  m.appendChild(el(`<p class="muted" style="font-size:12px;max-width:760px;margin:12px 2px 0">Safe to spend = Flex balance − what you owe on the card − bills still to pay before payday. Bills paid by card count too, because they add to what you owe.</p>`));
+}
+
+// Data tab: the pay cycle, or the way into the restart.
+function payPeriodsCard(){
+  const c=el(`<div class="card pad" style="max-width:640px;margin-top:14px"><h3 class="sec">Pay periods</h3></div>`);
+  if(Model.isRestarted(DATA)){
+    const cy=Periods.normCycle(Model.cycleOf(DATA));
+    c.appendChild(el(`<p style="margin:0;font-size:13px">Restarted from payday <b>${Periods.fmtY(DATA.meta.startDate)}</b>, paid every ${cy.days} days. Rows from before then are in the archive copy saved at the restart.</p>`));
+  } else {
+    c.appendChild(el(`<p style="margin:0 0 10px;font-size:13px">You're paid every four weeks. The restart moves the budget to pay periods from your payday on <b>${Periods.fmtY(RESTART_START)}</b> and archives everything before it.</p>`));
+    const b=el(`<button class="btn pri">Restart from payday…</button>`); b.onclick=()=>{ view="restart"; render(); };
+    c.appendChild(b);
+  }
+  return c;
+}
+
+/* The restart wizard. Its choices live in `wiz`, so a re-render (or a change
+   arriving from another device) keeps what's been typed; nothing is saved
+   until "Restart the budget". Typing updates `wiz` and the totals and checks
+   in place, so inputs keep focus; ticking, adding or switching things
+   re-renders. */
+function renderRestart(m){
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Restart from payday</h1><span class="sub">switch to four-weekly pay periods</span></div>`));
+  if(Model.isRestarted(DATA)){
+    wiz=null;
+    const c=el(`<div class="card pad" style="max-width:640px"><h3 class="sec">Already restarted</h3>
+      <p style="margin:0 0 12px">This budget restarted from payday ${Periods.fmtY(DATA.meta.startDate)}. That only happens once, so there's nothing to do here.</p></div>`);
+    const b=el(`<button class="btn pri">Go to Bills</button>`); b.onclick=()=>{ view="bills"; render(); };
+    c.appendChild(b); m.appendChild(c); return;
+  }
+  const pv=Model.restartPreview(DATA, RESTART_START, Periods.localISO());
+  wizState(pv);
+  const box=el(`<div class="wiz"></div>`);
+  box.appendChild(el(`<p class="muted" style="margin:0">Work down the steps. Nothing changes until you press <b>Restart the budget</b> at the end.</p>`));
+  [wizBackupCard, wizPeriodsCard, wizOpeningsCard, wizBillsCard, wizBudgetCard, wizReviewCard, wizRulesCard, wizConfirmCard]
+    .forEach(f=>box.appendChild(f(pv)));
+  m.appendChild(box);
+  refreshWiz();
+}
+function rerenderWiz(){ const y=window.scrollY; render(); window.scrollTo(0,y); }
+function wizState(pv){
+  if(!wiz) wiz={
+    backup:false, busy:false, error:"",
+    openings:{flex:"", card:""},
+    bills:pv.bills.map(b=>Object.assign({}, b, {dueDay:"", ydDay:"", ydMonth:""})),
+    budget:{cats:Object.assign({}, pv.budget.cats), savings:pv.budget.savings},
+    review:{},
+  };
+  // rows to sort can change if another device edits the ledger meanwhile
+  const keys=new Set();
+  pv.review.forEach(r=>{
+    const k=r.dir+":"+r.id, s=r.suggestion; keys.add(k);
+    if(!wiz.review[k]) wiz.review[k]=Object.assign({}, s && !(s.type==="Transfer" && s.other===Model.accountOf(r.row)) ? s : r.now);
+  });
+  Object.keys(wiz.review).forEach(k=>{ if(!keys.has(k)) delete wiz.review[k]; });
+  return wiz;
+}
+const wizChoices = () => ({start:RESTART_START, openings:wiz.openings, bills:wiz.bills, budget:wiz.budget, review:wiz.review});
+function wizProblems(){
+  const out=[], s=Store.status();
+  if(!wiz.backup) out.push("Download the backup (step 1).");
+  if(s.configured && s.state==="signed-out") out.push("Sign in on the Data tab first, so the restart is saved to the cloud.");
+  if(s.mode==="cloud" && s.state==="offline") out.push("You're offline — the restart needs a connection.");
+  return [...new Set(out.concat(Model.restartProblems(wizChoices())))];
+}
+function refreshWiz(){
+  if(!wiz) return;
+  const bt=document.getElementById("wizBillTotals"); if(bt) bt.textContent=wizBillTotals();
+  const bu=document.getElementById("wizBudgetTotal"); if(bu) bu.textContent=wizBudgetTotal();
+  document.querySelectorAll(".bill-hint").forEach(e=>{ e.textContent=e._bill?wizOverlap(e._bill):""; });
+  const ul=document.getElementById("wizProblems"), btn=document.getElementById("wizConfirm");
+  if(!ul||!btn) return;
+  const probs=wizProblems();
+  ul.innerHTML="";
+  probs.forEach(p=>{ const li=document.createElement("li"); li.textContent=p; ul.appendChild(li); });
+  if(!probs.length){ const li=document.createElement("li"); li.className="ok"; li.textContent="✓ Everything's ready."; ul.appendChild(li); }
+  btn.disabled = probs.length>0 || wiz.busy;
+}
+// a labelled field for the wizard's grids
+function wizField(label, input, cls){
+  const d=el(`<label class="fld${cls?" "+cls:""}"><span></span></label>`);
+  d.firstChild.textContent=label; d.appendChild(input);
+  return d;
+}
+
+function wizBackupCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">1 · Download a backup</h3>
+    <p>Saves your whole budget as it is now to a file on this device. The restart also keeps an archive copy (in the cloud when you're signed in), but a file of your own is the safest fallback.</p></div>`);
+  const row=el(`<div class="flex wrap" style="gap:10px"></div>`);
+  const b=el(`<button class="btn${wiz.backup?"":" pri"}">${wiz.backup?"Download again":"Download backup"}</button>`);
+  b.onclick=()=>{ download("budget-backup-"+Periods.localISO()+".json", JSON.stringify(DATA,null,1)); wiz.backup=true; rerenderWiz(); };
+  row.appendChild(b);
+  if(wiz.backup) row.appendChild(el(`<span class="ok-line">✓ Backup downloaded</span>`));
+  c.appendChild(row);
+  return c;
+}
+function wizPeriodsCard(pv){
+  const cy=Periods.DEFAULT_CYCLE, first=[0,1,2].map(n=>Periods.label(Periods.periodAt(cy,n)));
+  const wd=new Date(RESTART_START+"T12:00:00").toLocaleDateString("en-GB",{weekday:"long"});
+  const k=pv.counts.kept, a=pv.counts.archived;
+  const c=el(`<div class="card pad"><h3 class="sec">2 · Pay periods</h3>
+    <p>Payday is <b>${wd} ${Periods.fmtY(RESTART_START)}</b>, then every ${cy.days} days. Each pay period runs from a payday to the day before the next: ${first.join(" · ")} …</p>
+    <p class="muted" style="margin:0">Kept (on or after ${Periods.fmt(RESTART_START)}): <b>${k.out}</b> spends and <b>${k.in}</b> money in.
+      Archived (before): <b>${a.out}</b> spends and <b>${a.in}</b> money in — safe in the archive copy, but no longer in the budget.</p></div>`);
+  if(!k.out && !k.in) c.appendChild(el(`<p class="hint" style="margin:8px 0 0">Nothing is dated on or after ${Periods.fmt(RESTART_START)} yet. After the restart, import your statements from ${Periods.fmtY(RESTART_START)} onwards.</p>`));
+  return c;
+}
+function wizOpeningsCard(pv){
+  const c=el(`<div class="card pad"><h3 class="sec">3 · Opening balances</h3>
+    <p>What each account held at the close of <b>${Periods.fmtY(pv.close)}</b>, the day before payday — take them from your statements. For the card, enter what you owed as a minus (owing £250 → −250).</p></div>`);
+  const f=el(`<div class="fields"></div>`);
+  [["flex","FlexGraduate"],["card","Member Credit Card"]].forEach(([key,label])=>{
+    const ledger=pv.openings[key];
+    const inp=el(`<input type="number" step="0.01" placeholder="from your statement">`); inp.value=wiz.openings[key];
+    const fld=wizField(label, inp);
+    const hint=el(`<div class="hint"></div>`);
+    hint.appendChild(document.createTextNode("Ledger says "+money(ledger)+" "));
+    const use=el(`<button type="button" class="btn sm">Use this</button>`);
+    hint.appendChild(use);
+    const diff=el(`<div class="hint warn"></div>`);
+    const showDiff=()=>{
+      const v=parseFloat(inp.value);
+      diff.textContent = isNaN(v)||Math.abs(v-ledger)<0.005 ? "" : "Differs from the ledger by "+money(Model.round2(v-ledger))+". That's fine — the budget starts from your figure.";
+    };
+    inp.oninput=()=>{ wiz.openings[key]=inp.value; showDiff(); refreshWiz(); };
+    use.onclick=e=>{ e.preventDefault(); inp.value=ledger.toFixed(2); inp.oninput(); };
+    showDiff();
+    const d=el(`<div></div>`); d.appendChild(fld); d.appendChild(hint); d.appendChild(diff);
+    f.appendChild(d);
+  });
+  c.appendChild(f);
+  return c;
+}
+function wizBillsCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">4 · Bills</h3>
+    <p>Your regular bills at this month's budgeted amounts. Untick any you no longer pay, and set the day each one leaves your account. You can change all of this later on the Bills tab.</p></div>`);
+  wiz.bills.forEach(b=>c.appendChild(wizBillBlock(b)));
+  const add=el(`<button class="btn sm">+ Add bill</button>`);
+  add.onclick=()=>{
+    const nb={id:Model.newBillId("bill", wiz.bills), name:"", notes:"", match:"", freq:"monthly", amount:"", dueDay:"", dueDate:null,
+      ydDay:"", ydMonth:"", account:"Flex", reminder:false, include:true, added:true};
+    const ri=wiz.bills.findIndex(x=>x.reminder);
+    wiz.bills.splice(ri<0?wiz.bills.length:ri, 0, nb);
+    rerenderWiz();
+  };
+  c.appendChild(add);
+  c.appendChild(el(`<div class="wiz-total" id="wizBillTotals"></div>`));
+  return c;
+}
+function wizBillBlock(b){
+  const blk=el(`<div class="wiz-bill${b.include?"":" off"}"></div>`);
+  const top=el(`<div class="top"></div>`);
+  const chk=el(`<input type="checkbox" aria-label="Include this bill">`); chk.checked=!!b.include;
+  chk.onchange=()=>{ b.include=chk.checked; rerenderWiz(); };
+  const name=el(`<input type="text" placeholder="Bill name" aria-label="Bill name">`); name.value=b.name||"";
+  name.oninput=()=>{ b.name=name.value; if(b.added) b.id=Model.newBillId(b.name||"bill", wiz.bills.filter(x=>x!==b)); refreshWiz(); };
+  top.appendChild(chk); top.appendChild(name);
+  if(!b.include){
+    const s=el(`<span class="muted" style="white-space:nowrap;font-size:13px"></span>`);
+    s.textContent = b.reminder ? "reminder" : money(+b.amount||0)+(b.freq==="yearly"?" a year":" a month");
+    top.appendChild(s);
+  }
+  if(b.added){ const x=el(`<button class="btn sm danger" title="Remove this bill">✕</button>`); x.onclick=()=>{ wiz.bills.splice(wiz.bills.indexOf(b),1); rerenderWiz(); }; top.appendChild(x); }
+  blk.appendChild(top);
+  if(!b.include) return blk;
+
+  if(b.reminder) blk.appendChild(el(`<div class="hint" style="margin:0 0 10px">A reminder only: paying off the card moves your own money, so it's never counted in bills.</div>`));
+  const f=el(`<div class="fields"></div>`);
+  if(!b.reminder){
+    const amt=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); amt.value=b.amount??"";
+    amt.oninput=()=>{ b.amount=amt.value; refreshWiz(); };
+    f.appendChild(wizField("Amount (£)", amt));
+    const fr=el(`<select><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select>`); fr.value=b.freq;
+    fr.onchange=()=>{ b.freq=fr.value; rerenderWiz(); };
+    f.appendChild(wizField("How often", fr));
+  }
+  if(b.freq==="yearly"){
+    const wrap=el(`<span class="flex" style="gap:6px"></span>`);
+    const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="Day" aria-label="Day" style="width:5.5em">`); dd.value=b.ydDay||"";
+    const mm=el(`<select aria-label="Month"><option value="">Month</option></select>`);
+    Periods.MONTHS.forEach((mo,i)=>{ const o=document.createElement("option"); o.value=String(i+1); o.textContent=mo; mm.appendChild(o); });
+    mm.value=b.ydMonth||"";
+    const upd=()=>{
+      b.ydDay=dd.value; b.ydMonth=mm.value;
+      b.dueDate = dd.value && mm.value ? mm.value.padStart(2,"0")+"-"+dd.value.padStart(2,"0") : null;
+      refreshWiz();
+    };
+    dd.oninput=upd; mm.onchange=upd;
+    wrap.appendChild(dd); wrap.appendChild(mm);
+    f.appendChild(wizField("Due date", wrap));
+  } else {
+    const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="1–31">`); dd.value=b.dueDay??"";
+    dd.oninput=()=>{ b.dueDay=dd.value; refreshWiz(); };
+    f.appendChild(wizField("Due day of the month", dd));
+  }
+  if(!b.reminder){
+    const ac=el(`<select><option value="Flex">Flex</option><option value="Card">Credit card</option></select>`); ac.value=b.account==="Card"?"Card":"Flex";
+    ac.onchange=()=>{ b.account=ac.value; refreshWiz(); };
+    f.appendChild(wizField("Paid from", ac));
+  }
+  const mt=el(`<input type="text" placeholder="words from the statement line">`); mt.value=b.match||"";
+  mt.oninput=()=>{ b.match=mt.value; refreshWiz(); };
+  f.appendChild(wizField("Statement text (blank: the bill's name)", mt, "wide"));
+  const nt=el(`<input type="text" placeholder="optional">`); nt.value=b.notes||"";
+  nt.oninput=()=>{ b.notes=nt.value; };
+  f.appendChild(wizField("Notes", nt, "wide"));
+  blk.appendChild(f);
+  const h=el(`<div class="hint warn bill-hint"></div>`); h._bill=b;
+  blk.appendChild(h);
+  return blk;
+}
+// Bills whose statement texts overlap: a payment holding both goes to the
+// closer amount, then the closer date (Model.billTimeline).
+function wizOverlap(b){
+  if(!b.include) return "";
+  const text=x=>String(x.match||x.name||"").trim().toLowerCase(), t=text(b), acc=x=>x.account==="Card"?"Card":"Flex";
+  if(!t) return "";
+  const names=wiz.bills.filter(x=>x!==b && x.include && acc(x)===acc(b) && text(x) && (text(x).includes(t)||t.includes(text(x))))
+    .map(x=>x.name||"an unnamed bill");
+  return names.length ? "Statement text overlaps with "+names.join(", ")+": a payment matching both goes to the closest amount, then the closest date." : "";
+}
+function wizBillTotals(){
+  let mo=0, yr=0;
+  wiz.bills.forEach(b=>{ if(!b.include||b.reminder) return; const a=+b.amount||0; if(b.freq==="yearly") yr+=a; else mo+=a; });
+  const per=Periods.smoothedPerPeriod(mo,"monthly")+Periods.smoothedPerPeriod(yr,"yearly");
+  return "Monthly bills "+money(mo)+" · yearly "+money(yr)+" · about "+money(per)+" per pay period on average";
+}
+function wizBudgetCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">5 · Budget per pay period</h3>
+    <p>What you plan to spend in each pay period, outside bills. Started from September's budget × 12/13 (13 pay periods a year), rounded. You can set a different amount for any one period later.</p></div>`);
+  const f=el(`<div class="fields"></div>`);
+  Object.keys(wiz.budget.cats).forEach(cat=>{
+    const inp=el(`<input type="number" step="1" min="0" inputmode="decimal">`); inp.value=wiz.budget.cats[cat];
+    inp.oninput=()=>{ wiz.budget.cats[cat]=inp.value; refreshWiz(); };
+    f.appendChild(wizField(cat, inp));
+  });
+  const sv=el(`<input type="number" step="1" min="0" inputmode="decimal">`); sv.value=wiz.budget.savings;
+  sv.oninput=()=>{ wiz.budget.savings=sv.value; refreshWiz(); };
+  f.appendChild(wizField("Savings target", sv));
+  c.appendChild(f);
+  c.appendChild(el(`<div class="wiz-total" id="wizBudgetTotal"></div>`));
+  return c;
+}
+function wizBudgetTotal(){
+  const spend=Object.keys(wiz.budget.cats).reduce((s,k)=>s+(+wiz.budget.cats[k]||0),0), sav=+wiz.budget.savings||0;
+  return "Spending "+money(spend)+" + savings "+money(sav)+" = "+money(spend+sav)+" per pay period";
+}
+function wizReviewCard(pv){
+  const c=el(`<div class="card pad"><h3 class="sec">6 · Rows to sort</h3></div>`);
+  if(!pv.review.length){ c.appendChild(el(`<p class="muted" style="margin:0">Nothing to sort — every row being kept has a clear type.</p>`)); return c; }
+  c.appendChild(el(`<p>These rows were in "Other", or are money in from an unclear source. Choose what each one really was; any you leave keep the choice shown.</p>`));
+  const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th>What it was</th></tr></thead><tbody></tbody></table></div>`);
+  const tb=w.querySelector("tbody");
+  pv.review.forEach(r=>{
+    const k=r.dir+":"+r.id, own=Model.accountOf(r.row);
+    const tr=el(`<tr><td class="muted" style="white-space:nowrap">${fmtDate(r.row.date)}</td><td></td><td class="num"></td><td></td></tr>`);
+    tr.children[1].textContent=(r.row.name||"")+(own==="Card"?" · card":"");
+    tr.children[2].textContent=(r.dir==="in"?"+":"−")+money(+r.row.amount||0);
+    const sel=kindSelect(r.dir, wiz.review[k], own, {spend:Model.SPEND_CATS, income:Model.INCOME_CATS});
+    sel.onchange=()=>{ wiz.review[k]=parseKind(sel.value); refreshWiz(); };
+    tr.children[3].appendChild(sel);
+    tb.appendChild(tr);
+  });
+  c.appendChild(w);
+  return c;
+}
+function wizRulesCard(pv){
+  const xfers=pv.rules.filter(r=>r.transfer), other=pv.rules.filter(r=>r.category==="Other").length;
+  const c=el(`<div class="card pad"><h3 class="sec">7 · Rules</h3>
+    <p>${pv.rules.length} rules carry over, renamed to the new categories. Rules for moving your own money become transfers:</p></div>`);
+  const ul=el(`<ul class="wiz-list"></ul>`);
+  xfers.forEach(r=>{ const li=document.createElement("li"); li.textContent=`"${r.match}" → ${r.transfer==="Card"?"card repayment":"transfer to or from "+(ACCOUNT_WORD[r.transfer]||r.transfer)}`; ul.appendChild(li); });
+  c.appendChild(ul);
+  if(other) c.appendChild(el(`<p class="muted" style="margin:8px 0 0">${other} rule${other===1?" points":"s point"} at Other — you may want to re-point ${other===1?"it":"them"} on the Rules tab afterwards.</p>`));
+  return c;
+}
+function wizConfirmCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">8 · Restart</h3></div>`);
+  c.appendChild(el(`<ul class="wiz-list problems" id="wizProblems"></ul>`));
+  c.appendChild(el(`<p>This replaces the live budget with the new one and keeps the old one as an archive. <b>It can't be undone in the app.</b> If the budget is open on another device, reload it there first.</p>`));
+  const b=el(`<button class="btn pri" id="wizConfirm">Restart the budget</button>`);
+  b.onclick=confirmRestart;
+  c.appendChild(b);
+  if(wiz.error){ const e=el(`<div class="banner bad" style="margin-top:12px"></div>`); e.textContent=wiz.error; c.appendChild(e); }
+  return c;
+}
+async function confirmRestart(){
+  if(!wiz || wiz.busy || Model.isRestarted(DATA)) return;
+  const pv=Model.restartPreview(DATA, RESTART_START, Periods.localISO());
+  wizState(pv);
+  if(wizProblems().length){ rerenderWiz(); return; }
+  const arch=pv.counts.archived.out+pv.counts.archived.in;
+  if(!confirm(`Restart the budget from payday ${Periods.fmtY(RESTART_START)}?\n\n${arch} earlier rows move to the archive. This can't be undone in the app.`)) return;
+  wiz.busy=true; wiz.error=""; refreshWiz();
+  const overlay=el(`<div class="modal-bg"><div class="modal"><h3 style="margin:0 0 6px">Restarting…</h3>
+    <p class="muted" style="margin:0;font-size:13px">Saving the archive and the new budget. Keep this page open.</p></div></div>`);
+  document.body.appendChild(overlay);
+  try{
+    flushAppSave();
+    const next=Model.restartDoc(DATA, wizChoices());
+    const res=await Store.restart(DATA, next);
+    DATA=migrate(next); dirty=false; wiz=null; view="bills";
+    afterLoad();
+    toast("Restarted from payday "+Periods.fmt(RESTART_START)+". The old budget is kept as "+res.archiveKey+".");
+  }catch(e){
+    if(wiz){ wiz.busy=false; wiz.error=(e&&e.message)||String(e); }
+    rerenderWiz();
+  }finally{
+    overlay.remove();
+  }
+}
+
 /* ---------- BUDGET (Monthly | Yearly bills | Reconcile) ---------- */
 let budgetMonth=null;
 let budgetSubtab="monthly";
@@ -1345,8 +1733,12 @@ function buildImportPreview(text){
     if(best){keys[best.k]--;return true;} return false; }
   const iso=dt=>dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
 
-  const newTx=[],newInc=[]; let dupes=0,skipped=0,beforeCut=0;
+  const newTx=[],newInc=[]; let dupes=0,skipped=0,beforeCut=0,beforeStart=0;
+  // After the restart, rows before its payday belong to the archive: never add them,
+  // even when re-scanning everything.
+  const startIso = Model.isRestarted(DATA) ? DATA.meta.startDate : null;
   rows.forEach(r=>{
+    if(startIso && iso(r.date)<startIso){beforeStart++;return;}
     if(cutoff && r.date<=cutoff){beforeCut++;return;}
     if(SKIP_RE.test(r.desc)||SKIP_TYPE_RE.test(r.type)){skipped++;return;}
     if(r.out>0){ if(takeMatch(txKeys,r.date,r.out)){dupes++;return;}
@@ -1356,16 +1748,18 @@ function buildImportPreview(text){
       const src=categorise(r.desc);
       newInc.push({date:iso(r.date),amount:r.in,name:r.desc,source:src||"Other",card,flagged:!src,confirmed:false}); }
   });
-  importPreview={newTx,newInc,dupes,skipped,beforeCut,stated,total:rows.length};
+  importPreview={newTx,newInc,dupes,skipped,beforeCut,beforeStart,startIso,stated,total:rows.length};
   renderImportPreview();
 }
 function renderImportPreview(){
-  const {newTx,newInc,dupes,skipped,beforeCut,stated,total}=importPreview;
+  const {newTx,newInc,dupes,skipped,beforeCut,beforeStart,startIso,stated,total}=importPreview;
   const out=document.getElementById("impOut"); out.innerHTML="";
   const stats=el(`<div class="grid kpis" style="margin:14px 0">
     ${kpiHTML("Statement rows",total)}${kpiHTML("New spend",newTx.length)}${kpiHTML("New income",newInc.length)}
-    ${kpiHTML("Already in",dupes)}${kpiHTML("Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}</div>`);
+    ${kpiHTML("Already in",dupes)}${kpiHTML("Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}
+    ${startIso?kpiHTML("Before "+Periods.fmt(startIso),beforeStart):""}</div>`);
   out.appendChild(stats);
+  if(startIso && beforeStart) out.appendChild(el(`<div class="muted" style="font-size:12px;margin:-4px 0 12px">${beforeStart} row${beforeStart===1?"":"s"} dated before ${Periods.fmtY(startIso)} ignored — the budget restarted from that payday, so earlier rows stay in the archive.</div>`));
   const unknown=[...newTx,...newInc].filter(t=>t.flagged).length;
   const c=el(`<div class="card pad"></div>`);
   c.appendChild(el(`<div class="flex wrap" style="justify-content:space-between;margin-bottom:2px;gap:8px">
@@ -1445,8 +1839,10 @@ function renderRules(m){
   DATA.rules.forEach((r,i)=>{
     const tr=el(`<tr></tr>`);
     tr.appendChild(el(`<td><code>${escHTML(r.match)}</code></td>`));
-    const td=el(`<td></td>`);const s=el(`<select class="sel-cat"></select>`);DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;o.selected=c===r.category;s.appendChild(o);});
-    s.onchange=()=>{r.category=s.value;markDirty();};td.appendChild(s);tr.appendChild(td);
+    const td=el(`<td></td>`);
+    if(r.transfer){ td.appendChild(el(`<span class="chip">Transfer · ${escHTML(kindText("out",{type:"Transfer",other:r.transfer}))}</span>`)); tr.appendChild(td); }
+    else { const s=el(`<select class="sel-cat"></select>`);DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;o.selected=c===r.category;s.appendChild(o);});
+      s.onchange=()=>{r.category=s.value;markDirty();};td.appendChild(s);tr.appendChild(td); }
     tr.appendChild(el(`<td class="num muted">${counts[r.match]||0}</td>`));
     const td2=el(`<td class="right"></td>`);const del=el(`<button class="btn sm danger">✕</button>`);del.onclick=()=>{DATA.rules.splice(i,1);markDirty();renderRules(m);};td2.appendChild(del);tr.appendChild(td2);
     tb.appendChild(tr);
@@ -1463,15 +1859,13 @@ function renderAccounts(m){
   recordWealthSnapshot();
   m.innerHTML="";
   m.appendChild(el(`<div class="head"><h1>Accounts</h1><span class="sub">balances & the weekly reconcile check</span></div>`));
-  const a=DATA.accounts, cats=DATA.categories;
+  const a=DATA.accounts;
   // Amounts derived from the ledger (kept in sync automatically):
-  const debitSpend   =DATA.transactions.filter(t=>(t.card||"Debit")==="Debit" && cats.includes(t.category)).reduce((s,t)=>s+t.amount,0);
-  const creditPaid   =DATA.transactions.filter(t=>(t.card||"Debit")==="Debit" && !cats.includes(t.category)).reduce((s,t)=>s+t.amount,0); // "Credit"-tagged debit rows = card repayments
-  const creditCharges=DATA.transactions.filter(t=>(t.card||"Debit")==="Credit").reduce((s,t)=>s+t.amount,0);
-  const flexIncome   =DATA.income.filter(t=>(t.card||"Debit")!=="Credit").reduce((s,t)=>s+t.amount,0);
-  const creditRefunds=DATA.income.filter(t=>(t.card||"Debit")==="Credit").reduce((s,t)=>s+t.amount,0);
-  const flex   = a.openingFlex   - debitSpend + flexIncome - creditPaid;
-  const credit = a.openingCredit - creditCharges + creditPaid + creditRefunds;
+  const b=accountBuckets(), bal=Model.balances(DATA);
+  const flex=bal.flex, credit=bal.card;
+  const openLabel = Model.isRestarted(DATA)
+    ? "Opening balance (close "+Periods.fmt(Periods.addDays(DATA.meta.startDate,-1))+")"
+    : "Opening balance (1 Jan)";
 
   // ---- total wealth: everything you own minus what you owe ----
   a.savings = a.savings||[]; a.cash = a.cash||{n50:0,n20:0,n10:0,n5:0,coins:0};
@@ -1488,20 +1882,24 @@ function renderAccounts(m){
 
   // ---- FlexGraduate (current account) ----
   const c=el(`<div class="card pad" style="max-width:560px"><h3 class="sec">FlexGraduate — current account (Debit)</h3></div>`);
-  c.appendChild(kvEdit("Opening balance (1 Jan)",a,"openingFlex"));
-  c.appendChild(lineRO("− Debit spending",debitSpend));
-  c.appendChild(lineRO("+ Income",flexIncome));
-  c.appendChild(lineRO("− Credit-card repayments",creditPaid));
+  c.appendChild(kvEdit(openLabel,a,"openingFlex"));
+  c.appendChild(lineRO("− Spending",b.flex.spend));
+  c.appendChild(lineRO("+ Money in",b.flex.moneyIn));
+  c.appendChild(lineRO("− Credit-card repayments",b.flex.card));
+  if(b.flex.toSavings) c.appendChild(lineRO("− To savings",b.flex.toSavings));
+  if(b.flex.fromSavings) c.appendChild(lineRO("+ From savings",b.flex.fromSavings));
+  if(b.flex.other) c.appendChild(lineRO("± Other transfers",b.flex.other));
   c.appendChild(totalLine("Computed balance",flex));
   c.appendChild(reconcileRow(flex,"-2294.96"));
   m.appendChild(c);
 
   // ---- Member Credit Card ----
   const cc=el(`<div class="card pad" style="max-width:560px;margin-top:14px"><h3 class="sec">Member Credit Card</h3></div>`);
-  cc.appendChild(kvEdit("Opening balance (1 Jan)",a,"openingCredit"));
-  cc.appendChild(lineRO("− Card charges",creditCharges));
-  cc.appendChild(lineRO("+ Repayments made",creditPaid));
-  if(creditRefunds) cc.appendChild(lineRO("+ Refunds to card",creditRefunds));
+  cc.appendChild(kvEdit(openLabel,a,"openingCredit"));
+  cc.appendChild(lineRO("− Card charges",b.card.charges));
+  cc.appendChild(lineRO("+ Repayments made",b.card.repaid));
+  if(b.card.refunds) cc.appendChild(lineRO("+ Refunds to card",b.card.refunds));
+  if(b.card.other) cc.appendChild(lineRO("± Other transfers",b.card.other));
   cc.appendChild(totalLine("Computed balance",credit));
   cc.appendChild(reconcileRow(credit,"-1154.95"));
   m.appendChild(cc);
@@ -1550,6 +1948,32 @@ function renderAccounts(m){
   m.appendChild(s);
 
 }
+// What moved each account, from the ledger. Flex: {spend, moneyIn, card,
+// toSavings, fromSavings, other}; card: {charges, repaid, refunds, other}.
+// `card` / `repaid` are the net paid to the card; `other` is a signed net.
+// The lines add up to Model.balances.
+function accountBuckets(){
+  const f={spend:0,moneyIn:0,card:0,toSavings:0,fromSavings:0,other:0}, c={charges:0,repaid:0,refunds:0,other:0};
+  Model.ledger(DATA).forEach(r=>{
+    const k=Model.classify(r.row, r.dir, DATA.categories), own=Model.accountOf(r.row), amt=+r.row.amount||0;
+    const xfer = k.type==="Transfer" && k.other!==own;
+    if(r.flex){
+      if(own==="Flex" && r.dir==="out" && k.type==="Spend") f.spend+=amt;
+      else if(own==="Flex" && r.dir==="in" && (k.type==="Income"||k.type==="Refund")) f.moneyIn+=amt;
+      else if(own==="Flex" && xfer && k.other==="Savings"){ if(r.dir==="out") f.toSavings+=amt; else f.fromSavings+=amt; }
+      else if(xfer && (k.other==="Card"||own==="Card")) f.card-=r.flex;
+      else f.other+=r.flex;
+    }
+    if(r.card){
+      if(own==="Card" && r.dir==="out" && k.type==="Spend") c.charges+=amt;
+      else if(own==="Card" && r.dir==="in" && (k.type==="Income"||k.type==="Refund")) c.refunds+=amt;
+      else if(xfer && (k.other==="Flex"||own==="Flex")) c.repaid+=r.card;
+      else c.other+=r.card;
+    }
+  });
+  [f,c].forEach(o=>Object.keys(o).forEach(x=>{ o[x]=Model.round2(o[x]); }));
+  return {flex:f, card:c};
+}
 function kvEdit(label,obj,key){
   const d=el(`<div class="flex" style="justify-content:space-between;padding:6px 0"><span class="muted">${label}</span></div>`);
   const inp=el(`<input type="number" step="0.01" style="width:150px;text-align:right">`);inp.value=obj[key]??0;inp.onchange=()=>{obj[key]=parseFloat(inp.value)||0;markDirty();renderAccounts(document.getElementById("main"));};
@@ -1571,6 +1995,7 @@ function renderData(m){
   m.innerHTML="";
   m.appendChild(el(`<div class="head"><h1>Data</h1><span class="sub">where your budget is stored</span></div>`));
   m.appendChild(cloudCard());
+  m.appendChild(payPeriodsCard());
 
   const c=el(`<div class="card pad" style="max-width:640px;margin-top:14px"><h3 class="sec">Backups &amp; transfer</h3></div>`);
   const btns=el(`<div class="flex wrap" style="gap:10px"></div>`);
@@ -1787,33 +2212,13 @@ function incModal(){
 
 /* ---------- LEDGER — the single register: all money in + out, editable ---------- */
 function ledgerAll(){
-  // one row per transaction/income, carrying a ref to the real object so edits persist.
-  // Each row is classified by how it moves each account (Flex current a/c and the card):
-  //  - debit spend  -> Flex out
-  //  - card charge  -> Credit out (increases debt)
-  //  - card repayment (a debit tx tagged "Credit") -> Flex out AND Credit in (pays it down)
-  //  - income       -> Flex in (or Credit in if it's a refund tagged to the card)
-  const rows=[];
-  DATA.transactions.forEach(t=>rows.push({date:t.date,ref:t,kind:"tx",card:(t.card||"Debit")}));
-  DATA.income.forEach(t=>rows.push({date:t.date,ref:t,kind:"inc",card:(t.card||"Debit")}));
-  rows.sort((a,b)=>a.date.localeCompare(b.date)||(a.kind==="inc"?-1:1));   // income before spend same day
-  rows.forEach(r=>{
-    const t=r.ref, amt=t.amount;
-    r.flexEffect=0; r.creditEffect=0; r.affectsFlex=false; r.affectsCredit=false;
-    if(r.kind==="tx"){
-      if(r.card==="Debit"){
-        r.affectsFlex=true; r.flexEffect=-amt;
-        if(!DATA.categories.includes(t.category)){ r.affectsCredit=true; r.creditEffect=+amt; } // "Credit" = card repayment
-      } else { r.affectsCredit=true; r.creditEffect=-amt; }                                      // a card charge
-    } else {
-      if(r.card==="Credit"){ r.affectsCredit=true; r.creditEffect=+amt; }                        // refund to the card
-      else { r.affectsFlex=true; r.flexEffect=+amt; }
-    }
-  });
-  let fbal=(DATA.accounts&&DATA.accounts.openingFlex)||0;
-  let cbal=(DATA.accounts&&DATA.accounts.openingCredit)||0;
-  rows.forEach(r=>{ if(r.affectsFlex){ fbal+=r.flexEffect; r.flexBal=fbal; } if(r.affectsCredit){ cbal+=r.creditEffect; r.creditBal=cbal; } });
-  return rows;
+  // one row per transaction/income, carrying a ref to the real object so edits persist,
+  // with how it moves the Flex current account and the card, and the running balances
+  // (Model.ledger: a card repayment is Flex out AND card in; a transfer to savings is
+  // Flex out only; money in before money out on the same day).
+  return Model.ledger(DATA).map(r=>({date:r.row.date, ref:r.row, kind:r.dir==="out"?"tx":"inc", card:r.row.card||"Debit",
+    flexEffect:r.flex, creditEffect:r.card, affectsFlex:r.affectsFlex, affectsCredit:r.affectsCard,
+    flexBal:r.flexBal, creditBal:r.cardBal}));
 }
 // what a row shows in the current account view: {out,in,bal}
 function ledgerAmounts(r){
@@ -1828,14 +2233,17 @@ function ledgerFiltered(){
   else if(ledgerFilter.account==="Credit") rows=rows.filter(r=>r.affectsCredit);
   if(ledgerFilter.cat!=="All"){
     rows=rows.filter(r=>{
-      if(ledgerFilter.cat==="Credit") return r.kind==="tx" && !DATA.categories.includes(r.ref.category);
-      if(r.kind==="tx") return catAllocations(r.ref).some(a=>a.category===ledgerFilter.cat);
-      return srcAllocations(r.ref).some(a=>a.source===ledgerFilter.cat);   // income matched by source
+      if(ledgerFilter.cat==="Credit"){   // card repayments
+        const k=Model.classify(r.ref, r.kind==="tx"?"out":"in", DATA.categories);
+        return k.type==="Transfer" && k.other==="Card";
+      }
+      if(r.kind==="tx" || r.ref.type) return catAllocations(r.ref).some(a=>a.category===ledgerFilter.cat);
+      return srcAllocations(r.ref).some(a=>a.source===ledgerFilter.cat);   // older income rows: matched by source
     });
   }
   if(ledgerFilter.status==="Needs review") rows=rows.filter(r=>!r.ref.confirmed);
   else if(ledgerFilter.status==="Confirmed") rows=rows.filter(r=>r.ref.confirmed);
-  if(ledgerFilter.q){const s=ledgerFilter.q.toLowerCase(); rows=rows.filter(r=>((r.ref.name||"")+" "+(r.ref.category||r.ref.source||"")).toLowerCase().includes(s));}
+  if(ledgerFilter.q){const s=ledgerFilter.q.toLowerCase(); rows=rows.filter(r=>((r.ref.name||"")+" "+(r.ref.category||r.ref.source||r.ref.to||r.ref.from||"")).toLowerCase().includes(s));}
   return rows;
 }
 function renderLedger(m){
@@ -1928,6 +2336,7 @@ function ledgerRow(r,showBal){
 // the category/source cell: a plain dropdown + split button, or (once split) a summary
 // of the split with an edit link. Shared by the Ledger's spend and income rows.
 function ledgerAssignCell(t, isTx){
+  if(Model.isRestarted(DATA)) return ledgerKindCell(t, isTx);
   const td=el(`<td></td>`);
   const wrap=el(`<span class="flex" style="gap:6px;flex-wrap:wrap"></span>`);
   const hasSplit = isTx ? (t.categorySplits && t.categorySplits.length) : (t.sourceSplits && t.sourceSplits.length);
@@ -1950,6 +2359,82 @@ function ledgerAssignCell(t, isTx){
   if(t.confirmed) td.appendChild(el(`<span class="lockic" title="confirmed & locked">🔒</span>`));
   else td.appendChild(el(`<span class="review-tag">review</span>`));
   return td;
+}
+// Restarted budgets: one picker for what the row is (type + category, or the
+// account at the other end of a transfer), and a category split for spending
+// and refunds. Any amount left out of a split counts in the row's category.
+function ledgerKindCell(t, isTx){
+  const dir=isTx?"out":"in", k=Model.classify(t, dir, DATA.categories);
+  const td=el(`<td></td>`);
+  const wrap=el(`<span class="flex" style="gap:6px;flex-wrap:wrap"></span>`);
+  const splittable = k.type==="Spend" || k.type==="Refund";
+  if(splittable && t.categorySplits && t.categorySplits.length){
+    const u=catUnassignedAmt(t);
+    const parts=t.categorySplits.filter(s=>s.category).map(a=>`${escHTML(a.category)} ${money(a.amount)}`).join(" · ");
+    wrap.appendChild(el(`<span><b>${k.type==="Refund"?"Refund split":"Split"}:</b> ${parts}${Math.abs(u)>0.005?` <span class="muted">· ${money(u)} ${escHTML(k.category||"Other")}</span>`:''}</span>`));
+    const edit=el(`<button class="btn sm">edit split</button>`); edit.onclick=()=>categorySplitModal(t); wrap.appendChild(edit);
+  } else {
+    const sel=kindSelect(dir, k, Model.accountOf(t), {spend:Model.spendCats(DATA), income:Model.incomeCats(DATA)});
+    sel.disabled=t.confirmed;
+    sel.onchange=()=>{
+      const nk=parseKind(sel.value);
+      Model.setKind(t, dir, nk); t.flagged=false;
+      if(nk.type==="Spend" && t.name && !ruleFor(t.name)) offerRule(t.name, nk.category);
+      markDirty(); renderLedgerTable();
+    };
+    wrap.appendChild(sel);
+    if(splittable){
+      const sp=el(`<button class="btn sm" title="split across categories">split</button>`);
+      sp.onclick=()=>categorySplitModal(t); wrap.appendChild(sp);
+    }
+  }
+  td.appendChild(wrap);
+  if(t.confirmed) td.appendChild(el(`<span class="lockic" title="confirmed & locked">🔒</span>`));
+  else td.appendChild(el(`<span class="review-tag">review</span>`));
+  return td;
+}
+
+/* What a row is, as one <select>: value "Type|category" or "Transfer|account".
+   Money out: spending categories, or a transfer to another of your accounts.
+   Money in: income, a refund against a spending category, or a transfer in.
+   `own` is the row's account; `cats` = {spend:[…], income:[…]}. */
+const kindValue = k => k.type+"|"+(k.type==="Transfer" ? (k.other||"") : (k.category||""));
+function parseKind(v){
+  const i=String(v).indexOf("|"), type=String(v).slice(0,i), rest=String(v).slice(i+1);
+  return type==="Transfer" ? {type, category:null, other:rest} : {type, category:rest, other:null};
+}
+const ACCOUNT_WORD = {Card:"credit card", Flex:"Flex", Savings:"savings"};
+function kindText(dir, k){
+  if(k.type==="Transfer"){
+    if(dir==="out" && k.other==="Card") return "Card repayment";
+    return (dir==="out"?"To ":"From ")+(ACCOUNT_WORD[k.other]||k.other||"?");
+  }
+  if(k.type==="Refund") return "Refund: "+(k.category||"?");
+  if(k.type==="Spend"||k.type==="Income") return k.category||"?";
+  return k.type+": "+(k.category||"?");
+}
+function kindSelect(dir, kind, own, cats){
+  const s=el(`<select class="sel-cat"></select>`);
+  const group=(label, kinds)=>{
+    const g=document.createElement("optgroup"); g.label=label;
+    kinds.forEach(k=>{ const o=document.createElement("option"); o.value=kindValue(k); o.textContent=kindText(dir,k); g.appendChild(o); });
+    s.appendChild(g);
+  };
+  const transfers=Model.TRANSFER_ACCOUNTS.filter(a=>a!==own).map(a=>({type:"Transfer",category:null,other:a}));
+  if(dir==="out"){
+    group("Spending", cats.spend.map(c=>({type:"Spend",category:c,other:null})));
+    group("Transfer — your own money", transfers);
+  } else {
+    group("Income", cats.income.map(c=>({type:"Income",category:c,other:null})));
+    group("Refund — takes money off spending", cats.spend.map(c=>({type:"Refund",category:c,other:null})));
+    group("Transfer — your own money", transfers);
+  }
+  const cur=kindValue(kind);
+  if(![...s.options].some(o=>o.value===cur)){
+    const o=document.createElement("option"); o.value=cur; o.textContent=kindText(dir,kind); s.insertBefore(o, s.firstChild);
+  }
+  s.value=cur;
+  return s;
 }
 function categorySplitModal(t){
   const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Split across categories</h3></div></div>`);

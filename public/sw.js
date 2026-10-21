@@ -3,7 +3,7 @@
    with no signal. It deliberately never caches data: the budget document
    comes from Supabase (or the localStorage mirror), never from here. */
 
-const CACHE = "budget-shell-v2";
+const CACHE = "budget-shell-v3";
 const SHELL = [
   "./",
   "./index.html",
@@ -11,6 +11,8 @@ const SHELL = [
   "./css/mobile.css",
   "./js/config.js",
   "./js/storage.js",
+  "./js/periods.js",
+  "./js/model.js",
   "./js/app.js",
   "./manifest.webmanifest",
   "./icons/icon.svg",

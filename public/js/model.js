@@ -784,6 +784,44 @@
     return doc;
   }
 
+  // A restarted document as this version of the app expects it: anything
+  // missing is filled in, and what an older copy of the app does to one is
+  // undone — it adds the old monthly budget lists back, and saves transfer
+  // rules without their transfer. Changes `doc` in place; returns
+  // {doc, notes}, notes saying what was repaired.
+  function tidyDoc(doc) {
+    const notes = [];
+    const isObj = x => !!x && typeof x === "object" && !Array.isArray(x);
+    if (!Array.isArray(doc.categories) || !doc.categories.length) doc.categories = SPEND_CATS.slice();
+    if (!Array.isArray(doc.incomeCategories) || !doc.incomeCategories.length) doc.incomeCategories = INCOME_CATS.slice();
+    doc.payCycle = P.normCycle(Object.assign({ anchor: startOf(doc) }, doc.payCycle));
+    const bills = Array.isArray(doc.recurringBills) ? doc.recurringBills.filter(isObj) : [];
+    bills.forEach(b => {
+      if (!b.id) b.id = newBillId(b.name, bills);
+      if (!Array.isArray(b.versions)) b.versions = [];
+      if (!isObj(b.overrides)) b.overrides = {};
+    });
+    doc.recurringBills = bills;
+    const budget = doc.budget = isObj(doc.budget) ? doc.budget : {};
+    if (!Array.isArray(budget.standard)) budget.standard = [];
+    if (!isObj(budget.periods)) budget.periods = {};
+
+    const old = RESTART_DROPS.filter(k => k in doc);
+    if (old.length) {
+      old.forEach(k => { delete doc[k]; });
+      notes.push("Removed the old monthly budget lists that an older version of the app put back.");
+    }
+    let fixed = 0;
+    const rules = (doc.rules || []).map(r => {
+      if (!r || r.transfer || r.category || !String(r.match || "").trim()) return r;
+      fixed++;
+      return { match: r.match, transfer: /credit card/i.test(r.match) ? "Card" : "Savings" };
+    });
+    doc.rules = normaliseRules(rules);
+    if (fixed) notes.push("Repaired " + fixed + " transfer rule" + (fixed === 1 ? "" : "s") + " that an older version of the app had saved without the transfer.");
+    return { doc, notes };
+  }
+
   return {
     TYPES, SPEND_CATS, INCOME_CATS, TRANSFER_ACCOUNTS, OLD_SPEND, OLD_INCOME,
     accountOf, isRestarted, spendCats, incomeCats, round2,
@@ -795,6 +833,6 @@
     changeBillFrom, endBillFrom, overrideBill,
     rowPeriodKey, budgetFor, setBudget, resetBudget, setPay, setPayday,
     periodFlows, payFor, periodBudget, untilPayday,
-    newBillId, restartRules, restartPreview, restartProblems, restartDoc,
+    newBillId, restartRules, restartPreview, restartProblems, restartDoc, tidyDoc,
   };
 });

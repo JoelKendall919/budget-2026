@@ -115,3 +115,29 @@
   .btn.ok:hover{background:var(--good-bg)}
   .lockic{color:var(--muted);font-size:12px;margin-left:5px}
   .review-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--warn);margin-left:6px}
+  /* ---- pay periods: payday dashboard, restart wizard ---- */
+  .status{font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
+  .status.good{color:var(--good)} .status.warn{color:var(--warn)} .status.bad{color:var(--bad)}
+  .banner.bad{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+  .wiz{display:grid;gap:14px;max-width:760px}
+  .wiz .card p{margin:0 0 10px;font-size:13px}
+  .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px 12px;align-items:start}
+  .fld{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .fld > span:first-child{font-size:12px;font-weight:600;color:var(--muted)}
+  .fld input,.fld select{width:100%;min-width:0}
+  .fld.wide{grid-column:1/-1}
+  .fld .flex > select{flex:1}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .hint:empty{display:none}
+  .hint.warn{color:var(--warn)}
+  .wiz-bill{border:1px solid var(--line);border-radius:8px;background:var(--panel-2);padding:10px 12px;margin-bottom:10px}
+  .wiz-bill.off{opacity:.75}
+  .wiz-bill .top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .wiz-bill.off .top{margin-bottom:0}
+  .wiz-bill .top input[type=checkbox]{width:22px;height:22px;margin:0;flex:none;accent-color:var(--brand)}
+  .wiz-bill .top input[type=text]{flex:1;min-width:0;font-weight:600}
+  .wiz-list{margin:0 0 10px;padding-left:20px;font-size:13px}
+  .problems li{color:var(--bad);margin:2px 0}
+  .problems li.ok{color:var(--good);list-style:none;margin-left:-20px;font-weight:600}
+  .ok-line{color:var(--good);font-weight:600;font-size:13px}
+  .wiz-total{margin-top:12px;font-size:13px;font-weight:600}

@@ -318,6 +318,41 @@ test("restart never changes the old document (it is the archive)", () => {
   assert.equal(JSON.stringify(old), before);
 });
 
+/* ---------------- tidying a restarted document on load ---------------- */
+test("tidy: a freshly restarted document needs nothing", () => {
+  const old = oldDoc(), doc = M.restartDoc(old, choicesFor(M.restartPreview(old, START, TODAY)));
+  const before = JSON.stringify(doc), r = M.tidyDoc(doc);
+  assert.equal(r.doc, doc);
+  assert.deepEqual(r.notes, []);
+  assert.equal(JSON.stringify(doc), before);
+});
+
+test("tidy: anything missing is filled in, without a note", () => {
+  const doc = { meta: { startDate: START }, transactions: [], income: [], recurringBills: [{ name: "Gym" }, "junk"], budget: [] };
+  const { notes } = M.tidyDoc(doc);
+  assert.deepEqual(notes, []);
+  assert.deepEqual(doc.categories, M.SPEND_CATS);
+  assert.deepEqual(doc.incomeCategories, M.INCOME_CATS);
+  assert.deepEqual(doc.payCycle, { anchor: START, days: 28, overrides: {} });
+  assert.deepEqual(doc.recurringBills, [{ name: "Gym", id: "gym", versions: [], overrides: {} }]);
+  assert.deepEqual(doc.budget, { standard: [], periods: {} });
+  assert.deepEqual(doc.rules, []);
+});
+
+test("tidy: undoes what an older copy of the app does — old budget lists back, transfer rules saved bare", () => {
+  const old = oldDoc(), doc = M.restartDoc(old, choicesFor(M.restartPreview(old, START, TODAY)));
+  const want = JSON.parse(JSON.stringify(doc));
+  // the old app's migrate() adds these, and its rule de-duplication drops `transfer`
+  Object.assign(doc, { monthlyBudgets: {}, bills: [], yearlyBills: [] });
+  doc.rules = doc.rules.map(r => (r.transfer ? { match: r.match } : r));
+  const { notes } = M.tidyDoc(doc);
+  assert.equal(notes.length, 2);
+  assert.match(notes[0], /old monthly budget lists/);
+  assert.match(notes[1], /Repaired 3 transfer rules/);
+  assert.deepEqual(doc, want);
+  assert.deepEqual(M.tidyDoc(doc).notes, [], "once tidied, there's nothing more to do");
+});
+
 /* ---------------- a copy of the real data ---------------- */
 const DATA_FILE = process.env.BUDGET_DATA || path.join(__dirname, "..", "local", "budget-data.json");
 const real = fs.existsSync(DATA_FILE) ? JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) : null;

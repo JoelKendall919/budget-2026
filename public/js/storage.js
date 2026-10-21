@@ -27,6 +27,7 @@
   const MIRROR_KEY = "jk_budget_2026";              // shared with the legacy app
   const PENDING_KEY = "jk_budget_pending_v1";       // offline write queue marker
   const REV_KEY = "jk_budget_rev_v1";
+  const RETRY_MS = 15000;                           // wait before retrying a failed save
 
   const listeners = { change: [], status: [], conflict: [] };
   const emit = (name, payload) => listeners[name].forEach((fn) => { try { fn(payload); } catch (e) { console.error(e); } });
@@ -37,6 +38,7 @@
   let channel = null;
   let inFlight = null;       // promise of the current save, to serialise writes
   let queued = null;         // most recent document awaiting a save
+  let restarting = false;    // Store.restart is replacing the live document
 
   const Store = {
     mode: "local",
@@ -51,7 +53,7 @@
 
     get configured() { return !!CFG.isConfigured; },
     get signedIn() { return !!Store.user; },
-    get hasPendingWrite() { return !!(queued || inFlight) || localStorage.getItem(PENDING_KEY) === "1"; },
+    get hasPendingWrite() { return restarting || !!(queued || inFlight) || localStorage.getItem(PENDING_KEY) === "1"; },
   };
 
   function setState(state, extra) {
@@ -183,6 +185,10 @@
       return seed ? { doc: seed, source: "seed" } : { doc: null, source: null };
     }
 
+    // The cloud copy replaces the mirror, so a "pending" marker left by an
+    // earlier page is stale; left set, it would block live updates and the
+    // restart for good.
+    const clearStalePending = () => { if (!queued && !inFlight) localStorage.removeItem(PENDING_KEY); };
     try {
       const row = await fetchRow();
       if (row) {
@@ -190,6 +196,7 @@
         Store.lastSyncedAt = row.updated_at;
         localStorage.setItem(REV_KEY, String(row.revision));
         writeMirror(row.doc);
+        clearStalePending();
         setState("ready");
         return { doc: row.doc, source: "cloud" };
       }
@@ -199,6 +206,7 @@
       const seed = mirror || (await fetchSeed());
       if (seed) {
         await createRow(seed);
+        clearStalePending();
         return { doc: seed, source: "cloud-seeded" };
       }
       return { doc: null, source: null };
@@ -246,6 +254,7 @@
 
   /** Debounced save. Always writes the local mirror immediately. */
   Store.save = function (doc) {
+    if (restarting) return;               // it would be the document being replaced
     writeMirror(doc);
     if (Store.mode !== "cloud" || !Store.user) { Store.lastSyncedAt = new Date().toISOString(); emit("status", Store.status()); return; }
     queued = doc;
@@ -263,16 +272,19 @@
   };
 
   function pump() {
-    if (inFlight) return inFlight.then(() => { if (queued) return pump(); });
+    // A failed push puts its document back in the queue; carrying on at once
+    // would spin (offline, it would hang the page). It's retried later instead.
+    if (inFlight) return inFlight.then(ok => { if (ok && queued) return pump(); });
     if (!queued) return Promise.resolve();
     const doc = queued;
     queued = null;
     inFlight = pushDoc(doc).finally(() => { inFlight = null; });
-    return inFlight.then(() => { if (queued) return pump(); });
+    return inFlight.then(ok => { if (ok && queued) return pump(); });
   }
 
+  // Resolves true once the document is dealt with, false if it went back in the queue.
   async function pushDoc(doc) {
-    if (!navigator.onLine) { queued = doc; setState("offline"); return; }
+    if (!navigator.onLine) { if (!queued) queued = doc; setState("offline"); return false; }  // "online" flushes it
     try {
       const nextRev = (Store.revision || 0) + 1;
       const { data, error } = await sb
@@ -288,10 +300,10 @@
       if (!data || data.length === 0) {
         // Somebody else moved the row on. Don't clobber them.
         const row = await fetchRow();
-        if (!row) { await createRow(doc); localStorage.removeItem(PENDING_KEY); return; }
+        if (!row) { await createRow(doc); localStorage.removeItem(PENDING_KEY); return true; }
         emit("conflict", { local: doc, remote: row.doc, remoteRevision: row.revision, remoteUpdatedAt: row.updated_at });
         setState("ready");
-        return;
+        return true;
       }
 
       Store.revision = data[0].revision;
@@ -299,10 +311,14 @@
       localStorage.setItem(REV_KEY, String(Store.revision));
       localStorage.removeItem(PENDING_KEY);
       setState("ready");
+      return true;
     } catch (e) {
       console.warn("cloud save failed", e);
-      queued = doc;                       // keep it for the next attempt
+      if (!queued) queued = doc;          // keep it for the next attempt (unless a newer one is waiting)
       setState(navigator.onLine ? "error" : "offline", { error: e.message });
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => { pump(); }, RETRY_MS);
+      return false;
     }
   }
 
@@ -330,6 +346,94 @@
 
   function flushPending() { if (queued) pump(); }
 
+  /* ---------------- restart (one-off, docs/plans/pay-period-budgeting.md 3.6) ---------------- */
+
+  const LOCAL_ARCHIVE_KEY = MIRROR_KEY + "_archive";
+
+  /**
+   * Keep `oldDoc` as an archive, then replace the live budget with `newDoc`.
+   * Cloud: the archive is a new row, "<docKey>-archive" (or -2, -3… if that
+   * exists, so an archive is never overwritten); the live row is then updated
+   * only if no other device has saved since this one loaded it.
+   * Local: the archive goes in this browser next to the budget.
+   * Resolves to {archiveKey}. Throws an Error whose message says what
+   * happened; the live budget is unchanged whenever it throws.
+   */
+  Store.restart = async function (oldDoc, newDoc) {
+    if (restarting) throw new Error("A restart is already running.");
+    if (Store.configured && !Store.user) {
+      throw new Error("Sign in first, so the restart reaches every device. Nothing was changed.");
+    }
+    if (Store.mode !== "cloud" || !Store.user) {
+      let key = LOCAL_ARCHIVE_KEY;
+      for (let n = 2; localStorage.getItem(key) != null; n++) key = LOCAL_ARCHIVE_KEY + "_" + n;
+      try {
+        localStorage.setItem(key, JSON.stringify(oldDoc));
+        localStorage.setItem(MIRROR_KEY, JSON.stringify(newDoc));
+      } catch (e) {
+        localStorage.removeItem(key);
+        throw new Error("This browser's storage is full, so the old budget couldn't be archived. Nothing was changed.");
+      }
+      Store.lastSyncedAt = new Date().toISOString();
+      emit("status", Store.status());
+      return { archiveKey: key };
+    }
+
+    if (!navigator.onLine) throw new Error("You're offline. Connect to the internet and try again. Nothing was changed.");
+    await Store.flush();
+    if (Store.hasPendingWrite) {
+      throw new Error("Your latest changes haven't reached the cloud yet" + (Store.lastError ? " (" + Store.lastError + ")" : "") +
+        ". Nothing was changed. Wait for \"synced\" and try again.");
+    }
+    restarting = true;
+    clearTimeout(saveTimer);
+    try {
+      const row = await fetchRow();
+      if (!row) throw new Error("Couldn't find your budget in the cloud. Nothing was changed.");
+      if (row.revision !== Store.revision) {
+        throw new Error("This budget has changed on another device. Reload the page and run the restart again. Nothing was changed.");
+      }
+      const archiveKey = await insertArchive(oldDoc);
+      let res;
+      try {
+        res = await sb
+          .from("budget_documents")
+          .update({ doc: newDoc, revision: row.revision + 1, updated_at: new Date().toISOString() })
+          .eq("user_id", Store.user.id)
+          .eq("doc_key", CFG.docKey)
+          .eq("revision", row.revision)
+          .select("revision, updated_at");
+      } catch (e) { res = { error: e }; }
+      if (res.error || !res.data || !res.data.length) {
+        throw new Error("The old budget was archived (" + archiveKey + "), but the new one couldn't be saved" +
+          (res.error ? " (" + res.error.message + ")" : ": the budget changed on another device") +
+          ". Your live budget is unchanged. Reload the page and try again.");
+      }
+      queued = null;
+      Store.revision = res.data[0].revision;
+      Store.lastSyncedAt = res.data[0].updated_at;
+      localStorage.setItem(REV_KEY, String(Store.revision));
+      localStorage.removeItem(PENDING_KEY);
+      writeMirror(newDoc);
+      setState("ready", { error: null });
+      return { archiveKey };
+    } finally {
+      restarting = false;
+    }
+  };
+
+  async function insertArchive(doc) {
+    for (let n = 1; n <= 50; n++) {
+      const key = CFG.docKey + "-archive" + (n === 1 ? "" : "-" + n);
+      const { error } = await sb
+        .from("budget_documents")
+        .insert({ user_id: Store.user.id, doc_key: key, doc, revision: 1 });
+      if (!error) return key;
+      if (error.code !== "23505") throw new Error("Couldn't save the archive (" + error.message + "). Nothing was changed.");
+    }
+    throw new Error("Couldn't find a free name for the archive. Nothing was changed.");
+  }
+
   /* ---------------- live updates from other devices ---------------- */
 
   function startRealtime() {
@@ -344,7 +448,7 @@
             // (other doc_keys) arrive here too — never let one replace the live budget.
             if (!payload.new || payload.new.doc_key !== CFG.docKey) return;
             const rev = payload.new.revision;
-            if (!rev || rev === Store.revision) return;   // our own write echoing back
+            if (!rev || rev <= Store.revision) return;    // our own write echoing back, or old news
             if (Store.hasPendingWrite) return;            // we're mid-edit; poll/conflict will sort it
             Store.revision = rev;
             Store.lastSyncedAt = payload.new.updated_at;
@@ -364,7 +468,9 @@
       if (Store.hasPendingWrite || document.hidden) return;
       try {
         const row = await fetchRow();
-        if (row && row.revision !== Store.revision) {
+        // Only take a newer revision, and only if nothing was saved while we
+        // waited: a reply sent before a save can arrive after it.
+        if (row && row.revision > Store.revision && !Store.hasPendingWrite) {
           Store.revision = row.revision;
           Store.lastSyncedAt = row.updated_at;
           writeMirror(row.doc);
