@@ -116,6 +116,7 @@
     scrollbar-width:thin;
   }
   .tablewrap table{min-width:560px}
+  .tablewrap.fit table{min-width:0}      /* short tables fit the screen */
   th,td{padding:9px 8px; font-size:13px}
   th{font-size:10px}
 

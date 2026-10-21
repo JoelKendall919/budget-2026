@@ -1,26 +1,32 @@
 """
 Budget 2026 — shared domain logic for the command-line tools.
 
-This module is the Python mirror of the balance rules implemented in
-``public/js/app.js``. If you change how a balance is derived in the app,
-change it here too, or the tools will start disagreeing with the UI and
-you'll chase a phantom.
+This module is the Python mirror of the balance rules in
+``public/js/model.js`` (``classify`` and ``effects``). If you change how a
+balance is derived in the app, change it here too, or the tools will start
+disagreeing with the UI and you'll chase a phantom.
 
-The rules, restated (see ``ledgerAll`` and ``renderAccounts`` in app.js):
+The rules, restated:
 
 * Every ``amount`` is stored POSITIVE. Direction comes from which list the
-  row is in (``transactions`` = money out, ``income`` = money in) and from
-  the ``card`` field.
-* A ``transactions`` row with ``card == "Debit"`` and a category that IS one
-  of ``categories`` is ordinary spending: the Flex balance falls.
-* A ``transactions`` row with ``card == "Debit"`` whose category is NOT in
-  ``categories`` (in practice the category "Credit") is a credit-card
-  repayment: Flex falls AND the card debt shrinks. This is the transfer,
-  and it is why such rows must never be counted as spending.
-* A ``transactions`` row with ``card == "Credit"`` is a card purchase: the
-  card debt grows. Flex is untouched until it's repaid.
-* An ``income`` row with ``card == "Credit"`` is a refund onto the card.
-  Any other income lands in Flex.
+  row is in (``transactions`` = money out, ``income`` = money in). A row
+  with ``card == "Credit"`` is on the credit card; anything else is Flex.
+* A row moves its own account: money out lowers it (on the card, the debt
+  grows), money in raises it.
+* A row's ``type`` is Spend, Refund, Income or Transfer. A Transfer names
+  the other account in ``to`` (money out) or ``from`` (money in). A transfer
+  between Flex and the card moves BOTH: paying the card off is one Flex row,
+  "Transfer to Card", that lowers Flex AND shrinks the card debt. That's
+  why transfers must never be counted as spending.
+* Savings balances are typed in on the Accounts tab, so a transfer to or
+  from Savings only moves Flex (or the card).
+* Rows saved before types existed (before the restart) are read as they
+  always were: money out in "Savings" is a transfer to savings, and money
+  out in a category that isn't in ``categories`` (in practice "Credit") is
+  a card repayment.
+
+After the restart, ``meta.startDate`` is the budget's first day and the
+opening balances are at the close of the day before it.
 """
 
 from __future__ import annotations
@@ -30,15 +36,66 @@ import io
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 PENNY = 0.005
+
+# money-in sources before the restart that were real income (model.js OLD_INCOME)
+OLD_INCOME = ("Salary", "Presents", "Gifts")
 
 
 def money(x: float) -> float:
     """Round to pence, killing the float dust that accumulates over 1000 rows."""
     return round(x + 1e-9, 2)
+
+
+def account_of(row: dict) -> str:
+    """The account a row is on: "Card" or "Flex"."""
+    return "Card" if row.get("card") == "Credit" else "Flex"
+
+
+def classify(row: dict, direction: str, categories) -> tuple[str, str | None, str | None]:
+    """
+    (type, category, other account) for a row; `direction` is "out" or "in".
+    `categories` is only needed for rows saved before types existed.
+    """
+    kind = row.get("type")
+    if kind:
+        if kind == "Transfer":
+            other = (row.get("from") if direction == "in" else row.get("to")) or row.get("to") or row.get("from")
+            return "Transfer", None, other
+        return kind, row.get("category"), None
+    if direction == "out":
+        cat = row.get("category")
+        if cat == "Savings":
+            return "Transfer", None, "Savings"
+        if cat not in categories:
+            return "Transfer", None, "Card"
+        return "Spend", cat, None
+    src = row.get("source")
+    if src == "Savings":
+        return "Transfer", None, "Savings"
+    if src in OLD_INCOME:
+        return "Income", src, None
+    if src in ("Reimbursement", "Refund"):
+        return "Refund", "Other", None
+    if src and src in categories:
+        return "Refund", src, None
+    return "Income", src or "Other income", None
+
+
+def effects(row: dict, direction: str, categories) -> dict[str, float]:
+    """How a row moves the two tracked accounts: {"Flex": ±x, "Card": ±y}."""
+    amt = float(row.get("amount") or 0)
+    own = account_of(row)
+    sign = -1 if direction == "out" else 1
+    e = {"Flex": 0.0, "Card": 0.0}
+    e[own] += sign * amt
+    kind, _cat, other = classify(row, direction, categories)
+    if kind == "Transfer" and other in ("Flex", "Card") and other != own:
+        e[other] -= sign * amt
+    return e
 
 
 # --------------------------------------------------------------------------
@@ -62,11 +119,16 @@ class Doc:
     def save(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.raw, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    # -- classification ----------------------------------------------------
+    @property
+    def start_date(self) -> str | None:
+        """The budget's first day once it has been restarted, else None."""
+        return (self.raw.get("meta") or {}).get("startDate") or None
 
-    def is_card_repayment(self, t: dict) -> bool:
-        """A debit row whose category isn't a real budget category = transfer to the card."""
-        return (t.get("card") or "Debit") == "Debit" and t.get("category") not in self.categories
+    def _all(self):
+        for t in self.transactions:
+            yield "out", t
+        for i in self.income:
+            yield "in", i
 
     def opening_flex(self) -> float:
         return float(self.accounts.get("openingFlex") or 0)
@@ -78,58 +140,41 @@ class Doc:
 
     def balances(self, as_of: str | None = None) -> tuple[float, float]:
         """(flex, credit) as the app would compute them, optionally up to a date."""
-        def upto(rows):
-            return [r for r in rows if as_of is None or r.get("date", "") <= as_of]
-
-        tx, inc = upto(self.transactions), upto(self.income)
-
-        debit_spend = sum(t["amount"] for t in tx
-                          if (t.get("card") or "Debit") == "Debit" and t.get("category") in self.categories)
-        credit_paid = sum(t["amount"] for t in tx if self.is_card_repayment(t))
-        credit_charges = sum(t["amount"] for t in tx if (t.get("card") or "Debit") == "Credit")
-        flex_income = sum(i["amount"] for i in inc if (i.get("card") or "Debit") != "Credit")
-        credit_refunds = sum(i["amount"] for i in inc if (i.get("card") or "Debit") == "Credit")
-
-        flex = self.opening_flex() - debit_spend + flex_income - credit_paid
-        credit = self.opening_credit() - credit_charges + credit_paid + credit_refunds
+        flex, credit = self.opening_flex(), self.opening_credit()
+        for direction, r in self._all():
+            if as_of is not None and r.get("date", "") > as_of:
+                continue
+            e = effects(r, direction, self.categories)
+            flex += e["Flex"]
+            credit += e["Card"]
         return money(flex), money(credit)
 
     def rows_for(self, account: str) -> list[dict]:
         """
         Every row that moves `account` ("Debit" or "Credit"), normalised to
-        {date, name, delta, kind, id}. `delta` is signed: negative reduces
-        the balance (i.e. spending, or growing card debt).
+        {date, name, delta, kind, category, id}. `delta` is signed: negative
+        reduces the balance (i.e. spending, or growing card debt).
         """
+        acct = "Card" if account == "Credit" else "Flex"
         out: list[dict] = []
-        for t in self.transactions:
-            card = t.get("card") or "Debit"
-            amt = float(t["amount"])
-            if card == "Debit":
-                if account == "Debit":
-                    out.append(_row(t, -amt, "spend" if not self.is_card_repayment(t) else "card-payment"))
-                elif self.is_card_repayment(t) and account == "Credit":
-                    out.append(_row(t, +amt, "card-payment"))
-            else:  # a charge on the card
-                if account == "Credit":
-                    out.append(_row(t, -amt, "spend"))
-        for i in self.income:
-            card = i.get("card") or "Debit"
-            if card == "Credit" and account == "Credit":
-                out.append(_row(i, +float(i["amount"]), "refund"))
-            elif card != "Credit" and account == "Debit":
-                out.append(_row(i, +float(i["amount"]), "income"))
+        for direction, r in self._all():
+            e = effects(r, direction, self.categories)
+            if e[acct] or account_of(r) == acct:
+                out.append(_row(r, e[acct], direction, self.categories))
         out.sort(key=lambda r: (r["date"], -r["delta"]))
         return out
 
 
-def _row(src: dict, delta: float, kind: str) -> dict:
+def _row(src: dict, delta: float, direction: str, categories) -> dict:
+    kind, cat, other = classify(src, direction, categories)
+    label = f"transfer {'to' if direction == 'out' else 'from'} {other or '?'}" if kind == "Transfer" else (cat or kind)
     return {
         "id": src.get("id"),
         "date": src.get("date", ""),
         "name": (src.get("name") or "").strip(),
         "delta": money(delta),
         "kind": kind,
-        "category": src.get("category") or src.get("source"),
+        "category": label,
         "src": src,
     }
 
@@ -486,3 +531,18 @@ def norm_name(s: str) -> str:
 
 def days_between(a: str, b: str) -> int:
     return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
+
+
+def add_days(iso: str, n: int) -> str:
+    return (date.fromisoformat(iso) + timedelta(days=n)).isoformat()
+
+
+def checking_from(doc: Doc, since: str | None) -> str | None:
+    """
+    The first day to compare. A restarted budget holds nothing before its
+    start date (the opening balances cover it), so never earlier than that.
+    """
+    start = doc.start_date
+    if start and (not since or since < start):
+        return start
+    return since

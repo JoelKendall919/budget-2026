@@ -7,6 +7,7 @@
     --radius:10px;
     --c-Bills:#5b6bef; --c-Groceries:#1a9b6c; --c-PubSocial:#e0803a; --c-Takeaway:#d6548a;
     --c-Travel:#3aa5c9; --c-Gifts:#9b6bd6; --c-Other:#8a94a6; --c-Savings:#12a594;
+    --c-Shopping:#c9a227; --c-Health:#8cb83a; --c-Home:#a0714f;
   }
   /* dark palette applies when the OS asks for it AND no explicit choice is set,
      or whenever the user has explicitly chosen dark. data-theme="light" always wins. */
@@ -115,3 +116,81 @@
   .btn.ok:hover{background:var(--good-bg)}
   .lockic{color:var(--muted);font-size:12px;margin-left:5px}
   .review-tag{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--warn);margin-left:6px}
+  /* ---- pay periods: payday dashboard, restart wizard ---- */
+  .status{font-size:12px;font-weight:600;color:var(--muted);white-space:nowrap}
+  .status.good{color:var(--good)} .status.warn{color:var(--warn)} .status.bad{color:var(--bad)}
+  .banner.bad{background:var(--bad-bg);color:var(--bad);border-color:var(--bad)}
+  .wiz{display:grid;gap:14px;max-width:760px}
+  .wiz .card p{margin:0 0 10px;font-size:13px}
+  .fields{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px 12px;align-items:start}
+  .fld{display:flex;flex-direction:column;gap:4px;min-width:0}
+  .fld > span:first-child{font-size:12px;font-weight:600;color:var(--muted)}
+  .fld input,.fld select{width:100%;min-width:0}
+  .fld.wide{grid-column:1/-1}
+  .fld .flex > select{flex:1}
+  .hint{font-size:12px;color:var(--muted);margin-top:6px}
+  .hint:empty{display:none}
+  .hint.warn{color:var(--warn)}
+  .wiz-bill{border:1px solid var(--line);border-radius:8px;background:var(--panel-2);padding:10px 12px;margin-bottom:10px}
+  .wiz-bill.off{opacity:.75}
+  .wiz-bill .top{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .wiz-bill.off .top{margin-bottom:0}
+  .wiz-bill .top input[type=checkbox]{width:22px;height:22px;margin:0;flex:none;accent-color:var(--brand)}
+  .wiz-bill .top input[type=text]{flex:1;min-width:0;font-weight:600}
+  .wiz-list{margin:0 0 10px;padding-left:20px;font-size:13px}
+  .problems li{color:var(--bad);margin:2px 0}
+  .problems li.ok{color:var(--good);list-style:none;margin-left:-20px;font-weight:600}
+  .ok-line{color:var(--good);font-weight:600;font-size:13px}
+  .wiz-total{margin-top:12px;font-size:13px;font-weight:600}
+  /* ---- Bills and Budget tabs ---- */
+  .ppnav{display:flex;align-items:center;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+  .ppnav > .btn:not(.sm){min-width:40px;font-size:18px;line-height:1;padding:6px 12px}
+  .ppnav .btn:disabled{opacity:.35;cursor:default}
+  .pplab{display:flex;flex-direction:column;min-width:150px;text-align:center}
+  .pplab b{font-size:16px}
+  .pplab span{font-size:12px}
+  tr.tap{cursor:pointer}
+  td .nm{font-weight:600}
+  td .sub{font-size:12px;color:var(--muted);margin-top:1px}
+  tr.reminder td,tr.notdue td{color:var(--muted)}
+  tr.notdue .nm{font-weight:500}
+  .billfoot{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;padding:12px 14px;border-top:1px solid var(--line);font-size:13px}
+  .billfoot div{display:flex;flex-direction:column;gap:2px}
+  .billfoot span{color:var(--muted);font-size:12px}
+  .billfoot b{font-size:16px}
+  b.good{color:var(--good)} b.warn{color:var(--warn)} b.bad{color:var(--bad)}
+  .modal.sheet{max-height:90vh;overflow-y:auto}
+  .sheet-head{display:flex;align-items:flex-start;gap:10px;margin-bottom:6px}
+  .sheet-head h3{margin:0;flex:1;font-size:17px}
+  .sheet-sec{padding:12px 0;border-top:1px solid var(--line-2)}
+  .sheet-sec:first-child{border-top:none;padding-top:4px}
+  .sheet-sec h4{margin:0 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted)}
+  .sheet-sec p{margin:0 0 6px;font-size:13px}
+  .sheet-sec .status{white-space:normal}
+  .payrow{display:flex;align-items:center;gap:10px;font-size:13px;padding:6px 0;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--line-2);color:var(--ink)}
+  .payrow .d{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .payrow > span.muted{white-space:nowrap;width:4.2em}
+  .payrow.pick{cursor:pointer}
+  .payrow.pick:hover{background:var(--panel-2)}
+  .linkpick{margin-top:10px}
+  .linkpick input{width:100%}
+  .linkpick .list{max-height:260px;overflow-y:auto;margin-top:6px}
+  .payline{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px;margin:-4px 0 14px}
+  .sumline{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px;padding:14px 16px;max-width:760px}
+  .sumline > div{display:flex;flex-direction:column;gap:2px;align-items:flex-start}
+  .sumline .lab{font-size:12px;font-weight:600;color:var(--muted)}
+  .sumline b{font-size:19px;letter-spacing:-.3px}
+  .sumline .sub{font-size:11px;color:var(--muted)}
+  .sumline .btn{margin-top:4px}
+  table.budget td .bar{margin-top:5px;max-width:180px}
+  table.budget input.inline-in{width:6.5em;text-align:right;border-color:var(--line)}
+  table.budget tfoot td{border-top:2px solid var(--line);border-bottom:none}
+  table.budget td.num{white-space:nowrap}
+  td.neg{color:var(--bad)}
+  .linkbtn{background:none;border:none;padding:0;color:var(--brand);font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+  .linkbtn.sub{display:block;margin:3px 0 0 auto;font-size:11px;color:var(--muted)}
+  .savrow{display:grid;grid-template-columns:1fr auto auto;gap:14px;align-items:center;padding:12px 10px;border-top:1px solid var(--line)}
+  .savrow .linkbtn.sub{margin:3px 0 0}
+  .savrow .num{text-align:right}
+  .savrow input.inline-in{width:6.5em;text-align:right}
+  .banner.info{background:var(--panel-2);color:var(--ink);border-color:var(--line);font-weight:500}

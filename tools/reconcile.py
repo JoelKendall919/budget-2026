@@ -14,6 +14,11 @@ Options:
     --account Debit|Credit   only check one account
     --from YYYY-MM-DD        ignore anything before this date
     --verbose                show every day, not just the broken ones
+
+Once the budget has been restarted, checking starts at its start date
+(18 Sep 2026): the app holds nothing before then, and its opening balances
+are the bank's at the close of the day before. --from can only move that
+later.
 """
 
 from __future__ import annotations
@@ -26,8 +31,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from budget_lib import (  # noqa: E402
-    Doc, Statement, StatementRow, days_between, load_credit_pdfs,
-    load_statements, merge_statements, money, norm_name, parse_statement,
+    Doc, Statement, StatementRow, add_days, checking_from, days_between,
+    load_credit_pdfs, load_statements, merge_statements, money,
 )
 
 BOLD, DIM, RED, GRN, YEL, CYN, OFF = (
@@ -179,7 +184,8 @@ def summarise_missing(doc: Doc, st: Statement, since: str | None) -> None:
 # --------------------------------------------------------------------------
 
 
-def credit_check(doc: Doc, sts: list[Statement], pdf_folder: str | None, verbose: bool) -> None:
+def credit_check(doc: Doc, sts: list[Statement], pdf_folder: str | None, verbose: bool,
+                 since: str | None = None) -> None:
     """
     Reconcile the credit card.
 
@@ -191,23 +197,28 @@ def credit_check(doc: Doc, sts: list[Statement], pdf_folder: str | None, verbose
     few days between spending and settling.
     """
     pdfs = load_credit_pdfs(pdf_folder) if pdf_folder and Path(pdf_folder).exists() else []
+    # balances are compared from the app's balance the day before `since`
+    base_day = add_days(since, -1) if since else None
+    base = doc.balances(as_of=base_day)[1] if since else doc.opening_credit()
 
+    bank = [r for r in merge_statements(sts) if not since or r.date >= since] if sts else []
     if sts:
         hdr("Credit card — full ledger, against the statement exports")
-        bank = merge_statements(sts)
+        if not bank:
+            print(f"  {DIM}No card rows on the exports from {since}.{OFF}")
+    if bank:
         hi = max(r.date for r in bank)
-        app = [r for r in doc.rows_for("Credit") if r["date"] <= hi]
+        app = [r for r in doc.rows_for("Credit") if r["date"] <= hi and (not since or r["date"] >= since)]
 
         b_net = money(sum(r.delta for r in bank))
         a_net = money(sum(r["delta"] for r in app))
-        opening = doc.opening_credit()
 
         print(f"  {len(sts)} exports merged into {len(bank)} rows, "
               f"{min(r.date for r in bank)} → {hi}")
         print(f"  bank movement {b_net:>10.2f}   app movement {a_net:>10.2f}   "
               f"diff {money(a_net-b_net):>+9.2f}")
-        print(f"  bank balance  {money(opening+b_net):>10.2f}   "
-              f"app balance  {money(opening+a_net):>10.2f}   as at {hi}\n")
+        print(f"  bank balance  {money(base+b_net):>10.2f}   "
+              f"app balance  {money(base+a_net):>10.2f}   as at {hi}\n")
 
         missing, extra = _match_loose(app, bank, window=7)
         if not missing and not extra:
@@ -243,7 +254,7 @@ def credit_check(doc: Doc, sts: list[Statement], pdf_folder: str | None, verbose
         hdr("Credit card — closing balance per PDF statement")
         for st in pdfs:
             end = st.as_at                                    # type: ignore[attr-defined]
-            if not end:
+            if not end or (base_day and end < base_day):
                 continue
             app_close = doc.balances(as_of=end)[1]
             diff = money(app_close - st.stated_balance)
@@ -294,12 +305,15 @@ def main() -> int:
     if not sts:
         print(f"No statements found in {a.statements}", file=sys.stderr)
         return 1
+    since = checking_from(doc, a.since)
 
     flex, credit = doc.balances()
     hdr("Where the app thinks you are, right now")
     print(f"  Flex (debit)  {flex:>12.2f}")
     print(f"  Credit card   {credit:>12.2f}")
-    print(f"  {DIM}{len(doc.transactions)} spending rows · {len(doc.income)} income rows{OFF}")
+    print(f"  {DIM}{len(doc.transactions)} money-out rows · {len(doc.income)} money-in rows{OFF}")
+    if doc.start_date:
+        print(f"  {DIM}budget starts {doc.start_date} · checking from {since}{OFF}")
 
     if a.credit and Path(a.credit).exists():
         sts += [s for s in load_statements(a.credit) if s.path.parent != Path(a.statements)]
@@ -310,16 +324,16 @@ def main() -> int:
         hdr("Flex / debit — day-by-day against the statement balance")
         newest = max(debit, key=lambda s: (s.end or "", len(s.rows)))
         for st in sorted(debit, key=lambda s: s.end or ""):
-            res = compare_running(doc, st, a.since, a.verbose)
+            res = compare_running(doc, st, since, a.verbose)
             if res and not res.get("ok") and st is newest:
-                summarise_missing(doc, st, a.since)
+                summarise_missing(doc, st, since)
             print()
 
         if a.explain:
             explain_day(doc, newest, a.explain)
 
     if a.account != "Debit":
-        credit_check(doc, cred, a.pdfs, a.verbose)
+        credit_check(doc, cred, a.pdfs, a.verbose, since)
 
     return 0
 

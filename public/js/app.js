@@ -30,7 +30,9 @@ const money0 = v => GBP.format(Math.round(v||0)).replace(/\.00$/,"");
 const CAT_COLOR = {
   "Bills":"var(--c-Bills)","Groceries":"var(--c-Groceries)","Pub/Social":"var(--c-PubSocial)",
   "Takeaway/Restaurant":"var(--c-Takeaway)","Travel/Car":"var(--c-Travel)","Gifts":"var(--c-Gifts)",
-  "Other":"var(--c-Other)","Savings":"var(--c-Savings)"
+  "Other":"var(--c-Other)","Savings":"var(--c-Savings)",
+  "Pub & Social":"var(--c-PubSocial)","Eating out":"var(--c-Takeaway)","Transport":"var(--c-Travel)",
+  "Shopping":"var(--c-Shopping)","Health & Personal":"var(--c-Health)","Home":"var(--c-Home)"
 };
 const catColor = c => CAT_COLOR[c] || "var(--c-Other)";
 
@@ -41,7 +43,7 @@ let view = "dashboard";
 let period = {grain:"month", month:null, week:null};
 let txFilter = {cat:"All", card:"All", q:"", status:"All"};
 let incFilter = {source:"All", q:"", status:"All"};
-let ledgerFilter = {account:"All", cat:"All", status:"All", q:"", sort:"new"};
+let ledgerFilter = {account:"All", type:"All", cat:"All", status:"All", q:"", sort:"new"};
 let dashboardHideZeroBills=true;
 
 /* ---------- date helpers ---------- */
@@ -92,33 +94,30 @@ function categoryBudget(mk, cat){
 }
 function billBudget(mk, name){ const r=DATA.monthlyBudgets[mk]; return r ? (r.bills[name]??0) : 0; }
 function budgetFor(month, cat){ return categoryBudget(month, cat); }
-function monthBudgetKeys(){ return Object.keys(DATA.monthlyBudgets).sort(); }
-function nearestPriorBudgetMonth(mk){ const ks=monthBudgetKeys().filter(k=>k<mk); return ks.length?ks[ks.length-1]:null; }
-function ensureMonthBudget(mk, copyFromMk){
-  if(DATA.monthlyBudgets[mk]) return DATA.monthlyBudgets[mk];
-  const seed = copyFromMk && DATA.monthlyBudgets[copyFromMk];
-  const categories={}; DATA.categories.forEach(c=>categories[c]=seed?(seed.categories[c]??0):0);
-  const bills={}; DATA.bills.forEach(b=>bills[b.name]=seed?(seed.bills[b.name]??0):0);
-  DATA.monthlyBudgets[mk]={categories,bills};
-  markDirty();
-  return DATA.monthlyBudgets[mk];
-}
-// month choices for the Budget tab: months with real data, months that already have a
-// budget, plus the next 6 calendar months so you can plan ahead.
-function budgetMonthOptions(){
-  const s=new Set([...availableMonths(), ...monthBudgetKeys()]);
-  const last=[...s].sort().slice(-1)[0] || todayISO().slice(0,7);
-  let [y,mo]=last.split("-").map(Number);
-  for(let i=1;i<=6;i++){ mo++; if(mo>12){mo=1;y++;} s.add(y+"-"+String(mo).padStart(2,"0")); }
-  return [...s].sort();
-}
 function txInPeriod(t){
   if(period.grain==="all") return true;
+  if(period.grain==="pp") return Model.rowPeriodKey(DATA, t)===ppPeriod().key;
   if(period.grain==="year") return t.date.slice(0,4)===String(period.year||2026);
   if(period.grain==="month") return monthKey(t.date)===period.month;
   if(period.grain==="week") return weekKey(t.date)===period.week;
   return true;
 }
+// txInPeriod for many rows (works the pay period out once)
+function periodTest(){
+  if(period.grain!=="pp") return txInPeriod;
+  const key=ppPeriod().key;
+  return t=>Model.rowPeriodKey(DATA, t)===key;
+}
+// [from, to] of the selected week / month / year / all, as ISO dates
+function rangeOf(){
+  if(period.grain==="week"){ const b=weekBounds(period.week); return [isoOf(b.start), isoOf(b.end)]; }
+  if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); return [period.month+"-01", period.month+"-"+String(Periods.daysInMonth(y,mo)).padStart(2,"0")]; }
+  if(period.grain==="year") return [period.year+"-01-01", period.year+"-12-31"];
+  return [DATA.meta.startDate, lastDay()];
+}
+// today, or the latest row if that's later
+function lastDay(){ return [...DATA.transactions,...DATA.income].reduce((a,r)=>r.date>a?r.date:a, Periods.localISO()); }
+const nextMonthKey = k => { const [y,mo]=k.split("-").map(Number); return mo===12 ? (y+1)+"-01" : y+"-"+String(mo+1).padStart(2,"0"); };
 // a transaction counts as spending only if its category is a real budget category
 const isSpend = t => DATA.categories.includes(t.category);
 
@@ -139,18 +138,35 @@ function srcAssigned(t){ return srcAllocations(t).reduce((s,a)=>s+(+a.amount||0)
 function srcUnassignedAmt(t){ return Math.round((t.amount - srcAssigned(t))*100)/100; }
 function srcAmount(t, src){ return srcAllocations(t).filter(a=>a.source===src).reduce((s,a)=>s+(+a.amount||0),0); }
 function periodLabel(){
+  if(period.grain==="pp") return "Pay period "+Periods.label(ppPeriod());
   if(period.grain==="all") return "All time";
   if(period.grain==="year") return String(period.year||2026);
   if(period.grain==="month") return monthLabel(period.month);
   if(period.grain==="week") return weekRangeLabel(period.week);
 }
+// Restarted: every month / week / year from the restart to today (or the latest row).
 function availableMonths(){
+  if(Model.isRestarted(DATA)){
+    const out=[], end=lastDay().slice(0,7);
+    for(let k=DATA.meta.startDate.slice(0,7); k<=end; k=nextMonthKey(k)) out.push(k);
+    return out;
+  }
   const s=new Set(DATA.transactions.map(t=>monthKey(t.date)).concat(DATA.income.map(t=>monthKey(t.date))));
   return [...s].sort();
 }
 function availableWeeks(){
+  if(Model.isRestarted(DATA)){
+    const s=new Set(), last=lastDay();
+    for(let d=DATA.meta.startDate; d<=last; d=Periods.addDays(d,7)) s.add(weekKey(d));
+    s.add(weekKey(last));
+    return [...s].sort();
+  }
   const s=new Set(DATA.transactions.map(t=>weekKey(t.date)));
   return [...s].sort();
+}
+function availableYears(){
+  const out=[]; for(let y=+DATA.meta.startDate.slice(0,4); y<=+lastDay().slice(0,4); y++) out.push(y);
+  return out;
 }
 
 /* ---------- persistence ----------
@@ -163,10 +179,13 @@ function markDirty(){ dirty=true; refreshSaveIndicator(); scheduleSave(); }
 let saveTimer=null;
 function scheduleSave(){ clearTimeout(saveTimer); saveTimer=setTimeout(persist, 400); }
 async function persist(){
+  saveTimer=null;
   if(!DATA) return;
   Store.save(DATA);
   refreshSaveIndicator();
 }
+// Hand an edit still waiting out the debounce to the store straight away.
+function flushAppSave(){ if(saveTimer){ clearTimeout(saveTimer); persist(); } }
 function refreshSaveIndicator(){
   const dot=document.getElementById("saveDot"), t=document.getElementById("saveText");
   const fl=document.getElementById("fileLabel");
@@ -204,12 +223,11 @@ function shortTime(iso){
   }catch(e){ return ""; }
 }
 // Keep the footer indicator honest as the store changes state in the background.
-Store.on("status",()=>{ if(!Store.hasPendingWrite) dirty=false; refreshSaveIndicator(); });
+Store.on("status",()=>{ if(!Store.hasPendingWrite) dirty=false; refreshSaveIndicator(); if(view==="restart") refreshWiz(); });
 
 /* ---------- load ---------- */
 function migrate(d){
   d.categories = d.categories||[];
-  d.rules = dedupeRules(d.rules||[]);
   // confirmed defaults to true for anything already in the file (historical, already
   // reviewed). Imports set confirmed:false explicitly, which the spread preserves.
   d.transactions = (d.transactions||[]).map((t,i)=>({confirmed:true,flagged:false,card:"Debit",...t,id:t.id||("t"+i)}));
@@ -225,6 +243,16 @@ function migrate(d){
   d.accounts.cash = d.accounts.cash || {n50:0,n20:0,n10:0,n5:0,coins:0};   // notes counted; coins as one amount
   d.accounts.cash.coins = +d.accounts.cash.coins || 0;   // added later - backfill on existing data
   d.wealthSnapshots = d.wealthSnapshots || [];   // [{date,savings,cash}] - one per day, recorded on open/Accounts visit
+
+  // A budget restarted from a payday (pay periods, Bills and Budget tabs):
+  // fill in anything missing, and undo what an older copy of the app may
+  // have done to it (see Model.tidyDoc). Repairs are saved once loaded.
+  if(Model.isRestarted(d)){
+    const {notes}=Model.tidyDoc(d);
+    if(notes.length) setTimeout(()=>{ if(DATA===d){ toast(notes.join(" ")); markDirty(); } },0);
+    return d;
+  }
+  d.rules = dedupeRules(d.rules||[]);
 
   // ---- one-time migration: budgetDefault/budgets/billOverrides + bills(amount,frequency)
   // -> DATA.monthlyBudgets (every month fully independent, no default/override chain)
@@ -256,12 +284,8 @@ function migrate(d){
   d.bills = d.bills||[];
   return d;
 }
-function dedupeRules(rules){
-  const seen=new Set(); const out=[];
-  for(const r of rules){ const k=(r.match||"").toLowerCase(); if(!k||seen.has(k))continue; seen.add(k); out.push({match:k,category:r.category}); }
-  out.sort((a,b)=>b.match.length-a.match.length);
-  return out;
-}
+// Lower-case, no duplicates, longest match first; transfer rules keep their transfer.
+function dedupeRules(rules){ return Model.normaliseRules(rules); }
 async function boot(){
   await Store.init();
   const {doc} = await Store.load();
@@ -324,12 +348,17 @@ function toast(msg){
   clearTimeout(toast._t); toast._t=setTimeout(()=>t.classList.remove("show"),2600);
 }
 function afterLoad(){
-  const months=availableMonths();
-  period.month = months.includes("2026-"+String(new Date().getMonth()+1).padStart(2,"0"))
-      ? "2026-"+String(new Date().getMonth()+1).padStart(2,"0")
-      : months[months.length-1];
-  period.week = availableWeeks().slice(-1)[0];
-  period.year = 2026;
+  if(Model.isRestarted(DATA)){
+    const t=Periods.localISO();
+    period.grain="pp"; period.month=t.slice(0,7); period.week=weekKey(t); period.year=+t.slice(0,4);
+  } else {
+    const months=availableMonths();
+    period.month = months.includes("2026-"+String(new Date().getMonth()+1).padStart(2,"0"))
+        ? "2026-"+String(new Date().getMonth()+1).padStart(2,"0")
+        : months[months.length-1];
+    period.week = availableWeeks().slice(-1)[0];
+    period.year = 2026;
+  }
   recordWealthSnapshot();
   render();
 }
@@ -355,12 +384,15 @@ function recordWealthSnapshot(){
 /* ============================ RENDER ==================================== */
 function render(){
   refreshSaveIndicator();
-  document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active",b.dataset.view===view));
+  const navView = view==="restart" ? "data" : view;
+  document.querySelectorAll(".nav").forEach(b=>b.classList.toggle("active",b.dataset.view===navView));
   const m=document.getElementById("main");
   if(!DATA){ renderFirstRun(); return; }
+  if(period.grain==="pp" && !Model.isRestarted(DATA)) period.grain="month";
   updateBadges();
-  ({dashboard:renderDashboard,ledger:renderLedger,transactions:renderLedger,income:renderLedger,budget:renderBudget,
-    budgets:renderBudget,bills:renderBudget,import:renderImport,rules:renderRules,accounts:renderAccounts,data:renderData}[view]||renderDashboard)(m);
+  ({dashboard:renderDashboard,ledger:renderLedger,transactions:renderLedger,income:renderLedger,
+    bills:renderBills,budget:renderBudgetTab,budgets:renderBudgetTab,restart:renderRestart,
+    import:renderImport,rules:renderRules,accounts:renderAccounts,data:renderData}[view]||renderDashboard)(m);
 }
 function updateBadges(){
   const e=document.getElementById("badge-ledger"); if(!e) return;
@@ -373,25 +405,37 @@ document.querySelectorAll(".nav").forEach(b=>b.onclick=()=>{view=b.dataset.view;
 function periodControls(onchange){
   const wrap=document.createElement("div"); wrap.className="flex wrap";
   const seg=document.createElement("div"); seg.className="seg";
-  [["week","Week"],["month","Month"],["year","Year"],["all","All"]].forEach(([g,lab])=>{
+  const restarted=Model.isRestarted(DATA);
+  const grains=[["week","Week"],["month","Month"],["year","Year"],["all","All"]];
+  if(restarted) grains.unshift(["pp","Pay period"]);
+  grains.forEach(([g,lab])=>{
     const b=document.createElement("button"); b.textContent=lab; b.className=period.grain===g?"on":"";
     b.onclick=()=>{period.grain=g; onchange();}; seg.appendChild(b);
   });
   wrap.appendChild(seg);
-  if(period.grain==="month"){
+  const select=(opts, cur, set)=>{
     const s=document.createElement("select");
-    availableMonths().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=monthLabel(k);o.selected=k===period.month;s.appendChild(o)});
-    s.onchange=()=>{period.month=s.value;onchange()}; wrap.appendChild(s);
+    opts.forEach(([v,lab])=>{const o=document.createElement("option");o.value=v;o.textContent=lab;o.selected=v===cur;s.appendChild(o)});
+    s.onchange=()=>{set(s.value);onchange()}; wrap.appendChild(s);
+  };
+  if(period.grain==="pp"){
+    const cy=Model.cycleOf(DATA), p=ppPeriod(), now=Periods.periodFor(cy, Periods.localISO()), first=Periods.periodFor(cy, Model.startOf(DATA));
+    const opts=[];
+    for(let n=first.index; n<=Math.max(now.index,p.index); n++){ const q=Periods.periodAt(cy,n); opts.push([q.key, Periods.label(q)+(n===now.index?" (now)":"")]); }
+    select(opts, p.key, v=>{ ppKey = v===now.key ? null : v; });
+  } else if(period.grain==="month"){
+    select(availableMonths().map(k=>[k,monthLabel(k)]), period.month, v=>{period.month=v;});
   } else if(period.grain==="week"){
-    const s=document.createElement("select");
-    availableWeeks().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=k.replace("-W"," · wk ")+"  ("+weekRangeLabel(k)+")";o.selected=k===period.week;s.appendChild(o)});
-    s.onchange=()=>{period.week=s.value;onchange()}; wrap.appendChild(s);
+    select(availableWeeks().map(k=>[k,k.replace("-W"," · wk ")+"  ("+weekRangeLabel(k)+")"]), period.week, v=>{period.week=v;});
+  } else if(period.grain==="year" && restarted && availableYears().length>1){
+    select(availableYears().map(y=>[String(y),String(y)]), String(period.year), v=>{period.year=+v;});
   }
   return wrap;
 }
 
 /* ---------- DASHBOARD ---------- */
 function renderDashboard(m){
+  if(Model.isRestarted(DATA)) return renderPPDashboard(m);
   const tx=DATA.transactions.filter(t=>txInPeriod(t)&&isSpend(t));
   const inc=DATA.income.filter(txInPeriod);
   const catFilter = txFilter.cat;
@@ -524,46 +568,19 @@ function monthCoverage(mk){
   return (Math.round((hi-lo)/86400000)+1)/mEnd.getDate();
 }
 // real calendar bounds of the selected period (shared by the Pace card & budget pro-rating)
-function periodBounds(){
-  const today=new Date(); today.setHours(0,0,0,0);
-  if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); return {start:new Date(y,mo-1,1), end:new Date(y,mo,0)}; }
-  if(period.grain==="week") return weekBounds(period.week);
-  if(period.grain==="year"){ const y=+(period.year||2026); return {start:new Date(y,0,1), end:new Date(y,11,31)}; }
-  const ds=[...DATA.transactions,...DATA.income].map(t=>t.date).sort();
-  const start=ds.length?parseD(ds[0]):today; let end=ds.length?parseD(ds[ds.length-1]):today;
-  if(end>today) end=today;
-  return {start,end};
-}
-// budget for a category over the SELECTED RANGE: each month's own budget, pro-rated by
-// how many of that month's days fall inside the range. A week gets ~7/31 of the month's
-// budget instead of the whole month; a year includes every budgeted month (even ones
-// with no data yet); month view is the full month, unchanged.
-function budgetForRange(cat){
-  const {start,end}=periodBounds();
-  let sum=0;
-  const cur=new Date(start.getFullYear(), start.getMonth(), 1);
-  while(cur<=end){
-    const mk=cur.getFullYear()+"-"+String(cur.getMonth()+1).padStart(2,"0");
-    const dim=new Date(cur.getFullYear(), cur.getMonth()+1, 0).getDate();
-    const mStart=new Date(cur), mEnd=new Date(cur.getFullYear(), cur.getMonth(), dim);
-    const oStart=start>mStart?start:mStart, oEnd=end<mEnd?end:mEnd;
-    const overlap=Math.max(0, Math.round((oEnd-oStart)/86400000)+1);
-    sum += budgetFor(mk,cat) * overlap/dim;
-    cur.setMonth(cur.getMonth()+1);
-  }
-  return sum;
-}
 function kpi(lab,val,sub,cls="",prefix=""){
   return el(`<div class="card kpi"><div class="lab">${lab}</div><div class="val ${cls}">${prefix}${val}</div><div class="sub">${sub||""}</div></div>`);
 }
-function paceCard(tx,budget,spend){
-  const c=el(`<div class="card pad"><h3 class="sec">Pace</h3></div>`);
+function paceCard(tx,budget,spend,bounds,title="Pace"){
+  const c=el(`<div class="card pad"><h3 class="sec"></h3></div>`); c.querySelector("h3").textContent=title;
   const DAY=86400000;
   const today=new Date(); today.setHours(0,0,0,0);
   // real calendar bounds of whatever period is selected - every grain must be handled
   // here, or the card silently reports numbers for a period that isn't the one shown.
   let start,end;
-  if(period.grain==="month"){
+  if(bounds){
+    ({start,end}=bounds);
+  } else if(period.grain==="month"){
     const [y,mo]=period.month.split("-").map(Number); start=new Date(y,mo-1,1); end=new Date(y,mo,0);
   } else if(period.grain==="week"){
     ({start,end}=weekBounds(period.week));
@@ -702,12 +719,14 @@ function cashflowCard(){
   if(!rows.length){ c.appendChild(el(`<div class="muted">No data yet.</div>`)); return c; }
   const today=new Date(); today.setHours(0,0,0,0);
   let start,end;
-  if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); start=new Date(y,mo-1,1); end=new Date(y,mo,0); }
+  if(period.grain==="pp"){ const p=ppPeriod(); start=parseD(p.start); end=parseD(p.end); }
+  else if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); start=new Date(y,mo-1,1); end=new Date(y,mo,0); }
   else if(period.grain==="week"){ const [y,w]=period.week.split("-W").map(Number);
     const simple=new Date(Date.UTC(y,0,1+(w-1)*7)); const mon=new Date(simple); mon.setUTCDate(simple.getUTCDate()-((simple.getUTCDay()+6)%7));
     start=new Date(mon.getUTCFullYear(),mon.getUTCMonth(),mon.getUTCDate()); end=new Date(start); end.setDate(start.getDate()+6); }
   else if(period.grain==="year"){ start=new Date(period.year,0,1); end=new Date(period.year,11,31); }
   else { start=parseD(rows[0].ref.date); end=parseD(rows[rows.length-1].ref.date); }
+  if(Model.isRestarted(DATA)){ const s=parseD(DATA.meta.startDate); if(start<s) start=s; }
   if(end>today && period.grain!=="all") end=today;   // don't draw a flat guess into the future
   if(end<start){ c.appendChild(el(`<div class="muted">No activity in this period yet.</div>`)); return c; }
 
@@ -758,10 +777,12 @@ function netWorthCard(){
   if(!snaps.length || !rows.length){ c.appendChild(el(`<div class="muted" style="font-size:13px">Tracking starts today — each time you open the app or visit Accounts, today's savings + cash total is recorded, so a trend builds up over time.</div>`)); return c; }
   const today=new Date(); today.setHours(0,0,0,0);
   let start,end;
-  if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); start=new Date(y,mo-1,1); end=new Date(y,mo,0); }
+  if(period.grain==="pp"){ const p=ppPeriod(); start=parseD(p.start); end=parseD(p.end); }
+  else if(period.grain==="month"){ const [y,mo]=period.month.split("-").map(Number); start=new Date(y,mo-1,1); end=new Date(y,mo,0); }
   else if(period.grain==="week"){ ({start,end}=weekBounds(period.week)); }
   else if(period.grain==="year"){ start=new Date(period.year,0,1); end=new Date(period.year,11,31); }
   else { start=parseD(rows[0].ref.date); end=today; }
+  if(Model.isRestarted(DATA)){ const s=parseD(DATA.meta.startDate); if(start<s) start=s; }
   if(end>today) end=today;
   const firstSnap=parseD(snaps[0].date);
   if(start<firstSnap) start=firstSnap;
@@ -800,19 +821,20 @@ function netWorthCard(){
     (${delta>=0?'+':'−'}${money0(Math.abs(delta))})${snaps.length<5?' · savings/cash is held flat between visits — only '+snaps.length+' snapshot'+(snaps.length===1?'':'s')+' recorded so far, the trend fills in as you keep using the app':''}</div>`));
   return c;
 }
-function lineChart(pts,budget,days){
+function lineChart(pts,budget,days,ends){
   const W=820,H=180,pad=30; const max=Math.max(budget,...pts,1);
-  const x=i=>pad+(i/(days-1))*(W-pad*2), y=v=>H-pad-(v/max)*(H-pad*2);
+  const x=i=>pad+(i/Math.max(1,days-1))*(W-pad*2), y=v=>H-pad-(v/max)*(H-pad*2);
   const path=pts.map((v,i)=>(i?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)).join(" ");
   const area=path+` L ${x(pts.length-1)} ${H-pad} L ${x(0)} ${H-pad} Z`;
   const by=y(budget);
+  const [l0,l1]=ends||["day 1","day "+days];
   return el(`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">
     <line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="var(--line)"/>
     <line x1="${pad}" y1="${by}" x2="${W-pad}" y2="${by}" stroke="var(--muted)" stroke-dasharray="5 4"/>
     <path d="${area}" fill="var(--brand)" opacity=".10"/>
     <path d="${path}" fill="none" stroke="var(--brand)" stroke-width="2.5"/>
-    <text x="${pad}" y="${H-8}" fill="var(--muted)" font-size="11">day 1</text>
-    <text x="${W-pad}" y="${H-8}" fill="var(--muted)" font-size="11" text-anchor="end">day ${days}</text>
+    <text x="${pad}" y="${H-8}" fill="var(--muted)" font-size="11">${l0}</text>
+    <text x="${W-pad}" y="${H-8}" fill="var(--muted)" font-size="11" text-anchor="end">${l1}</text>
   </svg>`);
 }
 function monthBars(months){
@@ -875,182 +897,1055 @@ function offerRule(name,cat){
   }
 }
 
-/* ---------- BUDGET (Monthly | Yearly bills | Reconcile) ---------- */
-let budgetMonth=null;
-let budgetSubtab="monthly";
-let showZeroBills=false;
-let reconcileHideZeroMonthly=true;
-let reconcileHideZeroYearly=true;
-function renderBudget(m){
+/* ---------- PAY PERIODS: restart wizard, payday dashboard ----------
+   The budget restarts once, from a payday, into four-weekly pay periods
+   (docs/plans/pay-period-budgeting.md 3.6). Until then the Bills and
+   Budget tabs only point at the restart. */
+const RESTART_START = Periods.DEFAULT_CYCLE.anchor;
+let wiz = null;   // the restart wizard's choices while it's being filled in
+
+function needsRestart(m, title){
   m.innerHTML="";
-  m.appendChild(el(`<div class="head"><h1>Budget</h1><span class="sub">every month independent · bills reconciled against it · yearly bills separate</span></div>`));
-  const seg=el(`<div class="seg" style="margin-bottom:16px"></div>`);
-  [["monthly","Monthly"],["yearly","Yearly bills"],["bills","Reconcile"]].forEach(([k,lab])=>{
-    const b=el(`<button>${lab}</button>`); b.className=budgetSubtab===k?"on":""; b.onclick=()=>{budgetSubtab=k;render();}; seg.appendChild(b);
-  });
-  m.appendChild(seg);
-  if(budgetSubtab==="yearly") renderBudgetYearly(m);
-  else if(budgetSubtab==="bills") renderBudgetReconcile(m);
-  else renderBudgetMonthly(m);
+  m.appendChild(el(`<div class="head"><h1>${title}</h1></div>`));
+  const c=el(`<div class="card pad" style="max-width:640px"><h3 class="sec">Run the restart first</h3>
+    <p style="margin:0 0 8px">Bills and Budget work in pay periods: from one payday to the day before the next, every four weeks, starting with your payday on <b>${Periods.fmtY(RESTART_START)}</b>.</p>
+    <p class="muted" style="font-size:13px;margin:0 0 12px">The restart sets up your bills and a budget per pay period, keeps the rows from that payday on and archives everything earlier. Ledger, Import and Accounts work as normal until then.</p></div>`);
+  const b=el(`<button class="btn pri">Open the restart</button>`); b.onclick=()=>{ view="restart"; render(); };
+  c.appendChild(b); m.appendChild(c);
 }
-function renderBudgetMonthly(m){
-  if(!budgetMonth) budgetMonth = availableMonths().slice(-1)[0] || budgetMonthOptions()[0];
-  const bar=el(`<div class="card pad flex wrap" style="margin-bottom:14px;gap:12px;align-items:center"></div>`);
-  bar.appendChild(el(`<span class="muted">Month:</span>`));
-  const sel=el(`<select></select>`);
-  budgetMonthOptions().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=monthLabel(k);o.selected=k===budgetMonth;sel.appendChild(o);});
-  sel.onchange=()=>{budgetMonth=sel.value;render();}; bar.appendChild(sel);
-  const rec=DATA.monthlyBudgets[budgetMonth];
-  if(rec){
-    const rst=el(`<button class="btn sm danger">Clear this month's budget</button>`);
-    rst.onclick=()=>{ if(confirm("Clear "+monthLabel(budgetMonth)+"'s budget? Only this month is affected — every other month keeps its own numbers.")){ delete DATA.monthlyBudgets[budgetMonth]; markDirty(); render(); } };
-    bar.appendChild(rst);
-  }
-  m.appendChild(bar);
+function renderBills(m){
+  if(!Model.isRestarted(DATA)) return needsRestart(m,"Bills");
+  const p=ppPeriod(), today=Periods.localISO();
+  const pb=Model.periodBills(DATA, p, today);
+  m.innerHTML="";
+  const head=el(`<div class="head"><h1>Bills</h1><div class="spacer"></div></div>`);
+  const add=el(`<button class="btn pri sm">+ Add bill</button>`); add.onclick=()=>openBillEditor(null, p);
+  head.appendChild(add);
+  m.appendChild(head);
+  m.appendChild(ppNav(p));
 
-  if(!rec){
-    const prior=nearestPriorBudgetMonth(budgetMonth);
-    const c=el(`<div class="card pad"><h3 class="sec">No budget set for ${monthLabel(budgetMonth)} yet</h3>
-      <p class="muted" style="font-size:13px;margin:6px 0 14px">Every month's budget is completely independent — nothing here affects any other month. Start fresh, or copy an existing month's numbers as a starting point (you can still change them).</p></div>`);
-    const btns=el(`<div class="flex wrap" style="gap:10px"></div>`);
-    if(prior){ const cp=el(`<button class="btn pri">Copy from ${monthLabel(prior)}</button>`); cp.onclick=()=>{ensureMonthBudget(budgetMonth,prior);render();}; btns.appendChild(cp); }
-    const zero=el(`<button class="btn">Start from zero</button>`); zero.onclick=()=>{ensureMonthBudget(budgetMonth,null);render();}; btns.appendChild(zero);
-    c.appendChild(btns); m.appendChild(c);
-    return;
+  const c=el(`<div class="card" style="max-width:760px"></div>`);
+  if(!pb.items.length && !pb.notDue.length){
+    c.appendChild(el(`<div class="empty">No bills yet. Add your regular bills with <b>+ Add bill</b>.</div>`));
+    m.appendChild(c); return;
   }
-
-  // ---- category budgets: independent numbers for THIS month only ----
-  const c=el(`<div class="card pad"><h3 class="sec">Category budgets · ${monthLabel(budgetMonth)}</h3></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Category</th><th class="num">Budget</th><th class="num">This month actual</th></tr></thead><tbody></tbody></table></div>`);
+  const w=el(`<div class="tablewrap fit"><table class="bills"><thead><tr><th>Bill</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody></tbody></table></div>`);
   const tb=w.querySelector("tbody");
-  let total=0, totalActual=0;
-  DATA.categories.forEach(cat=>{
-    const val=categoryBudget(budgetMonth,cat); total+=val;
-    const cur=actualForMonth(budgetMonth,cat); totalActual+=cur;
-    const tr=el(`<tr><td><span class="tag" style="background:${catColor(cat)}">${cat}</span></td></tr>`);
-    const td=el(`<td class="num"></td>`);
-    if(cat==="Bills"){
-      td.innerHTML=`<span class="muted" title="Always the total of this month's monthly bills budget, below">${money(val)}</span>`;
-    } else {
-      const inp=el(`<input type="number" step="5" value="${val}" style="width:110px;text-align:right">`);
-      inp.onchange=()=>{ rec.categories[cat]=parseFloat(inp.value)||0; markDirty(); render(); };
-      td.appendChild(inp);
-    }
-    tr.appendChild(td);
-    tr.appendChild(el(`<td class="num">${money(cur)}</td>`));
+  pb.items.forEach(i=>{
+    const st=billStatusText(i);
+    const tr=el(`<tr class="tap${i.reminder?" reminder":""}"><td><div class="nm"></div><div class="sub"></div></td><td class="num"></td><td><div class="status ${st[0]}"></div><div class="sub"></div></td></tr>`);
+    tr.querySelector(".nm").textContent=i.bill.name+(i.edited?" ✏️":"");
+    const acct=(i.version||{}).account==="Card"?" · card":"";
+    tr.querySelector("td .sub").textContent="due "+Periods.fmt(i.date)+(i.date!==i.scheduled?" (usually "+Periods.fmt(i.scheduled)+")":"")+acct;
+    tr.children[1].textContent = i.reminder ? (i.expected?money(i.expected):"reminder") : money(i.expected);
+    tr.children[2].firstChild.textContent=st[1];
+    tr.children[2].lastChild.textContent=st[2];
+    tr.onclick=()=>openBillSheet(i.bill.id, i.slot);
     tb.appendChild(tr);
   });
-  tb.appendChild(el(`<tr style="font-weight:700"><td>Total</td><td class="num">${money(total)}</td><td class="num">${money(totalActual)}</td></tr>`));
+  pb.notDue.forEach(b=>{
+    const v=Model.billVersion(b, p.key)||{};
+    const tr=el(`<tr class="tap notdue"><td><div class="nm"></div><div class="sub"></div></td><td class="num"></td><td><div class="status">💤 not due this period</div></td></tr>`);
+    tr.querySelector(".nm").textContent=b.name;
+    tr.querySelector("td .sub").textContent=billScheduleText(v);
+    tr.children[1].textContent=b.reminder?"reminder":money(+v.amount||0);
+    tr.onclick=()=>openBillEditor(b.id, p);
+    tb.appendChild(tr);
+  });
   c.appendChild(w);
-  c.appendChild(el(`<div class="muted" style="font-size:12px;margin-top:10px">Bills' budget is set automatically from the monthly bills budget below.</div>`));
+  const t=pb.totals;
+  const foot=el(`<div class="billfoot"><div><span>Due this period</span><b>${money(t.due)}</b></div><div><span>Paid so far</span><b class="good">${money(t.paid)}</b></div><div><span>Still to pay</span><b${t.toPay>0?' class="warn"':""}>${money(t.toPay)}</b></div><div><span>Average per period</span><b class="muted">${money(t.smoothed)}</b></div></div>`);
+  c.appendChild(foot);
+  m.appendChild(c);
+  m.appendChild(el(`<p class="muted" style="font-size:12px;max-width:760px;margin:10px 2px 0">Tap a bill to link a different payment, mark it paid, skip it or change it this time only. Payments are matched automatically when the statement text appears within ${Model.MATCH_DAYS} days of the due date. The card repayment is a reminder only and isn't in the totals. A monthly bill skips one pay period a year, because there are 13 paydays.</p>`));
+}
+
+/* ---------- shared by Bills and Budget: which pay period is showing ---------- */
+let ppKey = null;   // the period's key; null = the one with today in it
+function ppPeriod(){
+  const cy=Model.cycleOf(DATA), p=ppKey && Periods.periodByKey(cy, ppKey);
+  return p || Periods.periodFor(cy, Periods.localISO());
+}
+function ppNav(p){
+  const cy=Model.cycleOf(DATA), first=Periods.periodFor(cy, Model.startOf(DATA)), cur=Periods.periodFor(cy, Periods.localISO());
+  const wrap=el(`<div class="ppnav"></div>`);
+  const prev=el(`<button class="btn" aria-label="Previous pay period">‹</button>`);
+  const next=el(`<button class="btn" aria-label="Next pay period">›</button>`);
+  prev.disabled=p.index<=first.index; next.disabled=p.index>=cur.index+13;
+  prev.onclick=()=>{ ppKey=Periods.periodAt(cy,p.index-1).key; render(); };
+  next.onclick=()=>{ ppKey=Periods.periodAt(cy,p.index+1).key; render(); };
+  const n=p.index-cur.index;
+  const lab=el(`<div class="pplab"><b></b><span class="muted"></span></div>`);
+  lab.firstChild.textContent=Periods.label(p); lab.title=Periods.labelLong(p);
+  lab.lastChild.textContent = n===0 ? "this pay period" : n===-1 ? "last pay period" : n===1 ? "next pay period" : n<0 ? (-n)+" periods ago" : "in "+n+" periods";
+  wrap.append(prev, lab, next);
+  if(n!==0){ const t=el(`<button class="btn sm">Back to now</button>`); t.onclick=()=>{ ppKey=null; render(); }; wrap.appendChild(t); }
+  return wrap;
+}
+// [status class, headline, detail] for one bill occurrence
+function billStatusText(i){
+  const ed=i.edited?" ✏️":"";
+  if(i.status==="paid"){
+    let d=(i.how==="manual"?"marked paid ":"")+(i.paidDate?Periods.fmt(i.paidDate)+" · ":"")+money(i.paidAmount);
+    if(i.diff) d+=" ("+money(Math.abs(i.diff))+(i.diff>0?" more":" less")+" than expected)";
+    if(i.shared) d+=" · shared with another bill";
+    return ["good","✅ paid"+ed, d];
+  }
+  if(i.status==="skipped") return ["","⏭ skipped"+ed,"not paying it this period"];
+  if(i.status==="overdue") return ["bad","🔴 overdue"+ed, (-i.daysUntil)+" days ago · no payment found"];
+  if(i.status==="due") return ["warn","⏳ due "+(i.daysUntil===0?"today":"yesterday")+ed, "may still be clearing"];
+  return ["","⏳ due "+(i.daysUntil===1?"tomorrow":"in "+i.daysUntil+" days")+ed, ""];
+}
+const ordinal = n => n+(n%10===1&&n!==11?"st":n%10===2&&n!==12?"nd":n%10===3&&n!==13?"rd":"th");
+function billScheduleText(v){
+  if(!v || !v.freq) return "";
+  const when = v.freq==="yearly" ? "yearly, "+(v.dueDate?Periods.fmt("2000-"+v.dueDate):"no date") : "monthly on the "+ordinal(+v.dueDay||0);
+  return when+(v.account==="Card"?" · card":"");
+}
+const billById = id => (DATA.recurringBills||[]).find(b=>b.id===id);
+
+// A modal that becomes a bottom sheet on a phone; Esc or a tap outside closes it.
+function openSheet(title, onClose){
+  const bg=el(`<div class="modal-bg"><div class="modal sheet"><div class="sheet-head"><h3></h3><button class="btn sm" aria-label="Close">✕</button></div><div class="sheet-body"></div></div></div>`);
+  bg.querySelector("h3").textContent=title;
+  const close=()=>{ if(!bg.isConnected) return; bg.remove(); document.removeEventListener("keydown", esc); if(onClose) onClose(); };
+  const esc=e=>{ if(e.key==="Escape") close(); };
+  bg.querySelector(".sheet-head button").onclick=close;
+  bg.onclick=e=>{ if(e.target===bg) close(); };
+  document.addEventListener("keydown", esc);
+  document.body.appendChild(bg);
+  return {bg, body:bg.querySelector(".sheet-body"), title:bg.querySelector("h3"), close};
+}
+
+/* One occurrence of a bill: its payments and the one-off changes. */
+function openBillSheet(billId, slot){
+  const s=openSheet("");
+  const find=()=>{
+    const today=Periods.localISO(), p=ppPeriod();
+    const tl=Model.billTimeline(DATA, Periods.addDays(p.end>today?p.end:today, 120));
+    const o=tl.find(x=>x.bill.id===billId && x.slot===slot);
+    return o ? {i:Model.describeBill(o, today), tl} : null;
+  };
+  const change=ch=>{ const b=billById(billId); if(!b) return; Model.overrideBill(b, slot, ch); markDirty(); render(); fill(); };
+  function fill(){
+    const f=find();
+    if(!f){ s.close(); return; }
+    const {i, tl}=f, b=i.bill, ov=b.overrides&&b.overrides[slot]||{}, B=s.body;
+    s.title.textContent=b.name+" · due "+Periods.fmt(i.date);
+    B.innerHTML="";
+    const st=billStatusText(i);
+    const top=el(`<div class="sheet-sec"><div class="status ${st[0]}" style="font-size:14px"></div><div class="muted" style="font-size:13px;margin-top:2px"></div></div>`);
+    top.firstChild.textContent=st[1]+(st[2]?" — "+st[2]:"");
+    top.lastChild.textContent=(b.reminder?"Reminder":"Expected "+money(i.expected))+" · "+billScheduleText(i.version)+(i.date!==i.scheduled?" · moved from "+Periods.fmt(i.scheduled):"");
+    B.appendChild(top);
+
+    // payments
+    const pay=el(`<div class="sheet-sec"><h4>Payment</h4></div>`);
+    if(i.how==="manual") pay.appendChild(el(`<p>Marked as paid by hand on ${Periods.fmt(i.paidDate)}: ${money(i.paidAmount)}.</p>`));
+    else if(i.status==="skipped") pay.appendChild(el(`<p class="muted">Skipped this period.</p>`));
+    else if(!i.payments.length) pay.appendChild(el(`<p class="muted">${ov.links?"No payment — you unlinked the automatic match.":"No matching payment found yet."}</p>`));
+    i.payments.forEach(r=>{
+      const row=el(`<div class="payrow"><span class="muted"></span><span class="d"></span><b></b></div>`);
+      row.children[0].textContent=Periods.fmt(r.date);
+      row.children[1].textContent=(r.name||"")+(Model.accountOf(r)==="Card"?" · card":"");
+      row.children[2].textContent=money(+r.amount||0);
+      const un=el(`<button class="btn sm">Unlink</button>`);
+      un.onclick=()=>change({links:i.payments.filter(x=>x.id!==r.id).map(x=>x.id), paid:null, skip:null});
+      row.appendChild(un); pay.appendChild(row);
+    });
+    if(i.how==="auto") pay.appendChild(el(`<p class="hint">Matched automatically.</p>`));
+    const acts=el(`<div class="flex wrap" style="margin-top:8px"></div>`);
+    const link=el(`<button class="btn sm">${i.payments.length?"Link another payment…":"Link a payment…"}</button>`);
+    link.onclick=()=>{ link.remove(); pay.appendChild(linkPicker(i, tl, id=>{
+      const keep=i.how==="auto"||i.how==="linked" ? i.payments.map(x=>x.id) : [];
+      change({links:[...new Set(keep.concat([id]))], paid:null, skip:null});
+    })); };
+    if(i.status!=="skipped") acts.appendChild(link);
+    if(ov.links){ const a=el(`<button class="btn sm">Back to automatic matching</button>`); a.onclick=()=>change({links:null}); acts.appendChild(a); }
+    pay.appendChild(acts);
+    B.appendChild(pay);
+
+    // paid by hand / skip
+    const hand=el(`<div class="sheet-sec"><h4>Paid another way, or not paying</h4></div>`);
+    if(i.how==="manual"){
+      const u=el(`<button class="btn sm">Undo "paid by hand"</button>`); u.onclick=()=>change({paid:null}); hand.appendChild(u);
+    } else if(i.status!=="skipped"){
+      const fl=el(`<div class="fields"></div>`);
+      const dt=el(`<input type="date">`); dt.value=i.date<=Periods.localISO()?i.date:Periods.localISO();
+      const am=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); am.value=i.expected;
+      fl.append(wizField("Paid on", dt), wizField("Amount (£)", am));
+      const go=el(`<button class="btn sm">Mark as paid</button>`);
+      go.onclick=()=>{
+        const a=parseFloat(am.value);
+        if(!dt.value || isNaN(a) || a<0){ toast("Enter the date and amount paid."); return; }
+        change({paid:{date:dt.value, amount:Model.round2(a)}, skip:null, links:null});
+      };
+      hand.appendChild(el(`<p class="hint" style="margin:0 0 8px">For cash, another account, or a payment the app can't see.</p>`));
+      hand.appendChild(fl); hand.appendChild(el(`<div style="margin-top:8px"></div>`)).appendChild(go);
+    }
+    const sk=el(`<button class="btn sm" style="margin-top:8px">${i.status==="skipped"?"Don't skip it":"Skip it this period"}</button>`);
+    sk.onclick=()=>change(i.status==="skipped" ? {skip:null} : {skip:true, paid:null, links:null});
+    hand.appendChild(el(`<div></div>`)).appendChild(sk);
+    B.appendChild(hand);
+
+    // this time only
+    const once=el(`<div class="sheet-sec"><h4>This time only</h4></div>`);
+    const fl=el(`<div class="fields"></div>`);
+    const am=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); am.value=ov.amount??""; am.placeholder=String(+i.version.amount||0);
+    const dt=el(`<input type="date">`); dt.value=ov.date||"";
+    fl.appendChild(wizField(b.reminder?"Statement amount (£)":"Amount (usual "+money(+i.version.amount||0)+")", am));
+    fl.appendChild(wizField("Due date (usual "+Periods.fmt(i.scheduled)+")", dt));
+    once.appendChild(fl);
+    const sv=el(`<button class="btn sm" style="margin-top:8px">Save for this time</button>`);
+    sv.onclick=()=>{
+      const ch={};
+      const a=am.value.trim()==="" ? null : parseFloat(am.value);
+      if(a!=null && (isNaN(a)||a<0)){ toast("The amount needs to be a number."); return; }
+      ch.amount=a==null?null:Model.round2(a);
+      const d=dt.value||null;
+      if(d && Math.abs(Periods.diffDays(i.scheduled, d))>31){ toast("A due date can move by up to 31 days."); return; }
+      ch.date = d===i.scheduled ? null : d;
+      change(ch);
+    };
+    once.appendChild(sv);
+    B.appendChild(once);
+
+    const end=el(`<div class="flex wrap sheet-sec"></div>`);
+    if(i.edited){ const r=el(`<button class="btn sm danger">Undo all changes to this one</button>`); r.onclick=()=>change({skip:null, amount:null, date:null, links:null, paid:null}); end.appendChild(r); }
+    const eb=el(`<button class="btn sm">Edit the bill…</button>`); eb.onclick=()=>{ s.close(); openBillEditor(billId, ppPeriod()); };
+    end.appendChild(eb);
+    B.appendChild(end);
+  }
+  fill();
+}
+// Money-out rows near a bill's due date, best match first, to link by hand.
+function linkPicker(i, tl, onPick){
+  const box=el(`<div class="linkpick"></div>`);
+  const q=el(`<input type="text" placeholder="Search descriptions">`);
+  box.appendChild(q);
+  const list=el(`<div class="list"></div>`); box.appendChild(list);
+  const mine=new Set(i.payments.map(r=>r.id)), paying=new Map();
+  tl.forEach(o=>o.payments.forEach(r=>{ if(o.bill.id!==i.bill.id||o.slot!==i.slot) paying.set(r.id, o.bill.name+" "+Periods.fmt(o.date)); }));
+  const lo=Periods.addDays(i.date,-14), hi=Periods.addDays(i.date,14);
+  const near=DATA.transactions.filter(r=>r.date>=lo && r.date<=hi && !mine.has(r.id))
+    .sort((a,b)=>Math.abs((+a.amount||0)-i.expected)-Math.abs((+b.amount||0)-i.expected) || Math.abs(Periods.diffDays(i.date,a.date))-Math.abs(Periods.diffDays(i.date,b.date)));
+  const draw=()=>{
+    const t=q.value.trim().toLowerCase();
+    const rows=near.filter(r=>!t||String(r.name||"").toLowerCase().includes(t)).slice(0,30);
+    list.innerHTML="";
+    if(!rows.length){ list.appendChild(el(`<p class="muted" style="font-size:13px">Nothing within 14 days of ${Periods.fmt(i.date)}.</p>`)); return; }
+    rows.forEach(r=>{
+      const b=el(`<button class="payrow pick"><span class="muted"></span><span class="d"></span><b></b></button>`);
+      b.children[0].textContent=Periods.fmt(r.date);
+      b.children[1].textContent=(r.name||"")+(Model.accountOf(r)==="Card"?" · card":"")+(paying.has(r.id)?" — paying "+paying.get(r.id):"");
+      b.children[2].textContent=money(+r.amount||0);
+      b.onclick=()=>onPick(r.id);
+      list.appendChild(b);
+    });
+  };
+  q.oninput=draw; draw();
+  return box;
+}
+
+/* Add a bill, or change one: amount, how often, due day and account change
+   from a chosen pay period on (earlier periods keep what they were); the
+   name, statement text and notes apply everywhere. */
+function openBillEditor(billId, p){
+  const b=billId?billById(billId):null;
+  if(billId && !b) return;
+  const cy=Model.cycleOf(DATA), first=Periods.periodFor(cy, Model.startOf(DATA)), cur=Periods.periodFor(cy, Periods.localISO());
+  const vs=b?(b.versions||[]).filter(v=>!v.off):[];
+  const v=b?(Model.billVersion(b, p.key)||vs[vs.length-1]||{}):{freq:"monthly", account:"Flex"};
+  const s=openSheet(b?"Edit "+b.name:"Add a bill");
+  const f={name:b?b.name:"", amount:v.amount??"", freq:v.freq||"monthly", dueDay:v.dueDay??"", dueDate:v.dueDate||null,
+    account:v.account||"Flex", match:b?b.match||"":"", notes:b?b.notes||"":"", ydDay:"", ydMonth:""};
+  if(f.dueDate){ const [mm,dd]=f.dueDate.split("-"); f.ydMonth=String(+mm); f.ydDay=String(+dd); }
+  let from=p.key;
+  const draw=()=>{
+    const B=s.body; B.innerHTML="";
+    const fl=el(`<div class="fields"></div>`);
+    const nm=el(`<input type="text">`); nm.value=f.name; nm.oninput=()=>{ f.name=nm.value; };
+    fl.appendChild(wizField("Name", nm, "wide"));
+    if(!(b&&b.reminder)){
+      const am=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); am.value=f.amount; am.oninput=()=>{ f.amount=am.value; };
+      fl.appendChild(wizField("Amount (£)", am));
+      const fr=el(`<select><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select>`); fr.value=f.freq;
+      fr.onchange=()=>{ f.freq=fr.value; draw(); };
+      fl.appendChild(wizField("How often", fr));
+    }
+    if(f.freq==="yearly"){
+      const wrap=el(`<span class="flex" style="gap:6px"></span>`);
+      const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="Day" aria-label="Day" style="width:5.5em">`); dd.value=f.ydDay;
+      const mm=el(`<select aria-label="Month"><option value="">Month</option></select>`);
+      Periods.MONTHS.forEach((mo,k)=>{ const o=document.createElement("option"); o.value=String(k+1); o.textContent=mo; mm.appendChild(o); });
+      mm.value=f.ydMonth;
+      const upd=()=>{ f.ydDay=dd.value; f.ydMonth=mm.value; f.dueDate=dd.value&&mm.value?mm.value.padStart(2,"0")+"-"+dd.value.padStart(2,"0"):null; };
+      dd.oninput=upd; mm.onchange=upd;
+      wrap.append(dd, mm);
+      fl.appendChild(wizField("Due date", wrap));
+    } else {
+      const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="1–31">`); dd.value=f.dueDay;
+      dd.oninput=()=>{ f.dueDay=dd.value; };
+      fl.appendChild(wizField("Due day of the month", dd));
+    }
+    if(!(b&&b.reminder)){
+      const ac=el(`<select><option value="Flex">Flex</option><option value="Card">Credit card</option></select>`); ac.value=f.account;
+      ac.onchange=()=>{ f.account=ac.value; };
+      fl.appendChild(wizField("Paid from", ac));
+    }
+    const mt=el(`<input type="text" placeholder="words from the statement line">`); mt.value=f.match; mt.oninput=()=>{ f.match=mt.value; };
+    fl.appendChild(wizField("Statement text (blank: link payments by hand)", mt, "wide"));
+    const nt=el(`<input type="text" placeholder="optional">`); nt.value=f.notes; nt.oninput=()=>{ f.notes=nt.value; };
+    fl.appendChild(wizField("Notes", nt, "wide"));
+    const fs=el(`<select></select>`);
+    for(let n=first.index; n<=cur.index+13; n++){
+      const q=Periods.periodAt(cy,n), o=document.createElement("option");
+      o.value=q.key; o.textContent=Periods.label(q)+(n===cur.index?" (now)":""); fs.appendChild(o);
+    }
+    fs.value=from; fs.onchange=()=>{ from=fs.value; };
+    fl.appendChild(wizField(b?"Amount, date and account change from":"Starts in the pay period", fs, "wide"));
+    B.appendChild(fl);
+    if(b) B.appendChild(el(`<p class="hint">Earlier pay periods keep what they were. The name, statement text and notes change everywhere.</p>`));
+    const btns=el(`<div class="flex wrap" style="margin-top:14px"></div>`);
+    const save=el(`<button class="btn pri">${b?"Save":"Add bill"}</button>`);
+    save.onclick=()=>{
+      const sch={amount:b&&b.reminder?(+v.amount||0):f.amount, freq:f.freq, dueDay:f.freq==="monthly"?f.dueDay:null,
+        dueDate:f.freq==="yearly"?f.dueDate:null, account:b&&b.reminder?"Flex":f.account};
+      const probs=Model.billProblems(Object.assign({name:f.name}, sch));
+      if(probs.length){ toast(probs[0]); return; }
+      const ch={amount:Model.round2(+sch.amount), freq:sch.freq, dueDay:sch.dueDay==null?null:+sch.dueDay, dueDate:sch.dueDate, account:sch.account};
+      DATA.recurringBills=DATA.recurringBills||[];
+      let bill=b?billById(billId):null;
+      if(b && !bill){ s.close(); return; }
+      if(!bill){
+        bill={id:Model.newBillId(f.name, DATA.recurringBills), name:"", match:"", notes:"", reminder:false, versions:[], overrides:{}};
+        DATA.recurringBills.push(bill);
+      }
+      bill.name=f.name.trim(); bill.match=f.match.trim(); bill.notes=f.notes;
+      const at=Model.billVersion(bill, from);
+      if(!at || ["amount","freq","dueDay","dueDate","account"].some(k=>(at[k]??null)!==(ch[k]??null))) Model.changeBillFrom(bill, from, ch);
+      markDirty(); s.close(); render();
+      toast(b?"Saved "+bill.name:"Added "+bill.name);
+    };
+    btns.appendChild(save);
+    if(b){
+      const stop=el(`<button class="btn">Stop it</button>`);
+      stop.onclick=()=>{
+        const q=Periods.periodByKey(cy, from);
+        if(!confirm(`Stop ${b.name} from ${Periods.label(q)}? Earlier pay periods keep it.`)) return;
+        const bill=billById(billId); if(bill) Model.endBillFrom(bill, from);
+        markDirty(); s.close(); render();
+      };
+      const del=el(`<button class="btn danger">Delete</button>`);
+      del.onclick=()=>{
+        if(!confirm(`Delete ${b.name} from every pay period, including its history? To stop paying it from now on, use "Stop it" instead.`)) return;
+        DATA.recurringBills=DATA.recurringBills.filter(x=>x.id!==billId);
+        markDirty(); s.close(); render();
+      };
+      btns.append(stop, del);
+    }
+    B.appendChild(btns);
+  };
+  draw();
+}
+
+function renderBudgetTab(m){
+  if(!Model.isRestarted(DATA)) return needsRestart(m,"Budget");
+  const p=ppPeriod(), today=Periods.localISO(), cy=Model.cycleOf(DATA);
+  const pb=Model.periodBudget(DATA, p, today);
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Budget</h1></div>`));
+  m.appendChild(ppNav(p));
+
+  // paydays
+  const nextKey=Periods.periodAt(cy, p.index+1).key;
+  const pd=el(`<div class="muted payline"></div>`);
+  pd.appendChild(document.createTextNode("Payday "+dayName(p.start)+(p.start!==p.key?" ✏️":"")+" · next payday "+dayName(p.next)+(p.next!==nextKey?" ✏️":"")+" "));
+  const chp=el(`<button class="btn sm">Change payday</button>`); chp.onclick=()=>openPaydaySheet(p);
+  pd.appendChild(chp);
+  m.appendChild(pd);
+
+  // pay − bills − budgets − savings = left to allocate
+  const S=pb.summary, pay=pb.pay;
+  const paySub = pay.source==="typed" ? "typed in ✏️" : pay.source==="received" ? "received" : pay.source==="last" ? "same as last pay" : "no pay yet";
+  const sum=el(`<div class="card sumline"></div>`);
+  const part=(lab,val,sub,cls)=>{ const d=el(`<div><span class="lab"></span><b class="${cls||""}"></b><span class="sub"></span></div>`); d.children[0].textContent=lab; d.children[1].textContent=val; d.children[2].textContent=sub||""; sum.appendChild(d); return d; };
+  const payBox=part("Pay", money(S.pay), paySub);
+  const pe=el(`<button class="btn sm">Edit</button>`); pe.onclick=()=>openPaySheet(p, pb); payBox.appendChild(pe);
+  part("− Bills due", money(S.billsDue), "from the Bills tab");
+  part("− Budgets", money(S.budgets), "categories below");
+  part("− Savings target", money(S.savings), "");
+  part("= Left to allocate", money(S.unallocated), S.unallocated<0?"over-planned":"", S.unallocated<0?"bad":"good");
+  m.appendChild(sum);
+
+  // categories
+  const c=el(`<div class="card" style="max-width:760px;margin-top:14px"></div>`);
+  const w=el(`<div class="tablewrap fit"><table class="budget"><thead><tr><th>Category</th><th class="num">Budget</th><th class="num">Spent</th><th class="num">Left</th></tr></thead><tbody></tbody><tfoot></tfoot></table></div>`);
+  const tb=w.querySelector("tbody");
+  pb.rows.forEach(r=>{
+    const pct=r.budget>0?Math.min(100, r.spent/r.budget*100):(r.spent>0?100:0);
+    const over=r.left<0;
+    const tr=el(`<tr><td><div class="nm"></div><div class="bar"><i style="width:${pct.toFixed(0)}%;background:${over?"var(--bad)":catColor(r.category)}"></i></div></td><td class="num"></td><td class="num"></td><td class="num${over?" neg":""}"></td></tr>`);
+    tr.querySelector(".nm").textContent=r.category+(r.edited?" ✏️":"");
+    if(r.fromBills){
+      const a=el(`<button class="linkbtn" title="Open the Bills tab"></button>`); a.textContent=money(r.budget);
+      a.onclick=()=>{ view="bills"; render(); };
+      tr.children[1].appendChild(a);
+      tr.children[1].appendChild(el(`<div class="sub">from Bills</div>`));
+    } else {
+      tr.children[1].appendChild(budgetInput(p, r.category, r.budget));
+      if(r.edited){
+        const rs=el(`<button class="linkbtn sub" title="Use the standard budget again"></button>`); rs.textContent="reset to "+money0(r.standard);
+        rs.onclick=()=>{ Model.resetBudget(DATA, p.key, r.category); markDirty(); render(); };
+        tr.children[1].appendChild(rs);
+      }
+    }
+    tr.children[2].textContent=money(r.spent);
+    tr.children[3].textContent=money(r.left);
+    tb.appendChild(tr);
+  });
+  const T=pb.totals;
+  w.querySelector("tfoot").appendChild(el(`<tr><td><b>Total</b></td><td class="num"><b>${money(T.budget)}</b></td><td class="num"><b>${money(T.spent)}</b></td><td class="num${T.left<0?" neg":""}"><b>${money(T.left)}</b></td></tr>`));
+  c.appendChild(w);
+
+  // savings target vs net saved
+  const sv=pb.savings, sr=el(`<div class="savrow"><div><div class="nm">Savings target${sv.edited?" ✏️":""}</div><div class="sub">saved = transfers to savings − transfers back</div></div></div>`);
+  const sin=budgetInput(p, null, sv.target); sr.appendChild(sin);
+  const got=el(`<div class="num"><b></b><div class="sub">saved</div></div>`); got.firstChild.textContent=money(sv.saved);
+  if(sv.target>0 && sv.saved>=sv.target) got.firstChild.className="good";
+  sr.appendChild(got);
+  if(sv.edited){
+    const rs=el(`<button class="linkbtn sub"></button>`); rs.textContent="reset to "+money0(sv.standard);
+    rs.onclick=()=>{ Model.resetBudget(DATA, p.key, null); markDirty(); render(); };
+    sr.firstChild.appendChild(rs);
+  }
+  c.appendChild(sr);
   m.appendChild(c);
 
-  // ---- monthly bills budget: a separate, independent table for THIS month ----
-  const c2=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Monthly bills budget · ${monthLabel(budgetMonth)}</h3></div>`);
-  const w2=el(`<div class="tablewrap"><table><thead><tr><th>Bill</th><th class="num">Budget</th><th class="num">Paid this month</th></tr></thead><tbody></tbody></table></div>`);
-  const tb2=w2.querySelector("tbody");
-  let total2=0;
-  const monthBillTx=billPayments().filter(t=>monthKey(t.date)===budgetMonth && hasMonthlyPart(t));
-  const monthBillInc=billIncome().filter(t=>monthKey(t.date)===budgetMonth && hasMonthlyPart(t));
-  const zeroBills=[];
-  DATA.bills.forEach(b=>{
-    const val=rec.bills[b.name]??0; total2+=val;
-    if(val===0 && !showZeroBills){ zeroBills.push(b); return; }
-    const net=billPaidFor(b.name,monthBillTx)-billPaidFor(b.name,monthBillInc);
-    const tr=el(`<tr></tr>`);
-    tr.appendChild(el(`<td>${escHTML(b.name)}</td>`));
-    const td=el(`<td class="num"></td>`); const inp=el(`<input type="number" step="1" value="${val}" style="width:110px;text-align:right">`);
-    inp.onchange=()=>{ rec.bills[b.name]=parseFloat(inp.value)||0; markDirty(); render(); };
-    td.appendChild(inp); tr.appendChild(td);
-    tr.appendChild(el(`<td class="num muted">${money(net)}</td>`));
-    tb2.appendChild(tr);
-  });
-  tb2.appendChild(el(`<tr style="font-weight:700"><td>Total</td><td class="num">${money(total2)}</td><td></td></tr>`));
-  c2.appendChild(w2);
-  if(!DATA.bills.length) c2.appendChild(el(`<div class="muted" style="font-size:12px;margin-top:10px">No monthly bill types yet — add one below.</div>`));
-  if(zeroBills.length){
-    const link=el(`<button class="btn sm" style="margin-top:10px">Show ${zeroBills.length} bill${zeroBills.length>1?'s':''} with no budget set (${zeroBills.map(b=>b.name).join(", ")})</button>`);
-    link.onclick=()=>{ showZeroBills=true; render(); };
-    c2.appendChild(link);
-  } else if(showZeroBills){
-    const link=el(`<button class="btn sm" style="margin-top:10px">Hide bills with no budget set</button>`);
-    link.onclick=()=>{ showZeroBills=false; render(); };
-    c2.appendChild(link);
-  }
-  c2.appendChild(el(`<div class="muted" style="font-size:12px;margin-top:10px">Reconciled in detail (payments assigned to each bill, refunds netted) on the <b>Reconcile</b> tab.</div>`));
-  m.appendChild(c2);
-
-  m.appendChild(monthlyBillTypesEditor());
-
-  // ---- copy this month's numbers elsewhere ----
-  const others=budgetMonthOptions().filter(k=>k!==budgetMonth);
-  if(others.length){
-    const c3=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Copy ${monthLabel(budgetMonth)}'s numbers to another month</h3></div>`);
-    const row=el(`<div class="flex wrap" style="gap:10px"></div>`);
-    const tsel=el(`<select></select>`);
-    others.forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=monthLabel(k);tsel.appendChild(o);});
-    const cpBtn=el(`<button class="btn">Copy</button>`);
-    cpBtn.onclick=()=>{ const target=tsel.value; DATA.monthlyBudgets[target]={categories:{...rec.categories},bills:{...rec.bills}}; markDirty(); alert("Copied to "+monthLabel(target)+"."); };
-    row.appendChild(tsel); row.appendChild(cpBtn); c3.appendChild(row); m.appendChild(c3);
-  }
+  const skipped=pb.bills.notDue.filter(b=>!b.reminder && (Model.billVersion(b,p.key)||{}).freq==="monthly").map(b=>b.name);
+  if(skipped.length) m.appendChild(el(`<div class="banner info" style="max-width:760px;margin-top:14px">${escHTML(skipped.join(", "))} ${skipped.length===1?"isn't":"aren't"} due this pay period — monthly bills skip one period a year, as there are 13 paydays.</div>`));
+  m.appendChild(el(`<p class="muted" style="font-size:12px;max-width:760px;margin:10px 2px 0">Spent = spending in the category minus refunds back into it. Transfers (card repayments, savings) never count. Change a budget and you'll be asked whether it's for this period only (✏️) or this and future periods.</p>`));
 }
-function monthlyBillTypesEditor(){
-  const c=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Monthly bill types</h3><div class="muted" style="font-size:12px;margin-bottom:8px">The list is shared across months — renaming or removing one here applies everywhere. Each month's <b>amount</b> stays independent (set above).</div></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Bill</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table></div>`);
+const dayName = iso => new Date(iso+"T12:00:00").toLocaleDateString("en-GB",{weekday:"short"})+" "+Periods.fmt(iso);
+// A budget amount you can type over; asks whether the change is for this
+// period only or this and future periods. category null = savings target.
+function budgetInput(p, category, value){
+  const inp=el(`<input class="inline-in num" type="number" step="1" min="0" inputmode="decimal">`);
+  inp.value=Math.round(value*100)/100; inp.setAttribute("aria-label",(category||"Savings target")+" budget");
+  inp.onkeydown=e=>{ if(e.key==="Enter") inp.blur(); };
+  inp.onchange=()=>{
+    const v=parseFloat(inp.value);
+    if(isNaN(v)||v<0){ toast("Enter an amount (0 or more)."); render(); return; }
+    if(Model.round2(v)===Model.round2(value)) return;
+    let done=false;
+    const s=openSheet((category||"Savings target")+": "+money(v), ()=>{ if(!done) render(); });
+    s.body.appendChild(el(`<p style="margin:0 0 14px;font-size:14px">Change it for which pay periods?</p>`));
+    const row=el(`<div class="flex wrap"></div>`);
+    const one=el(`<button class="btn pri">This period only</button>`), fut=el(`<button class="btn">This and future periods</button>`);
+    one.onclick=()=>{ done=true; Model.setBudget(DATA, p.key, category, v, "period"); markDirty(); s.close(); render(); };
+    fut.onclick=()=>{ done=true; Model.setBudget(DATA, p.key, category, v, "future"); markDirty(); s.close(); render(); };
+    row.append(one, fut); s.body.appendChild(row);
+    s.body.appendChild(el(`<p class="hint">"This and future" changes the standard budget from ${Periods.label(p)} on. Earlier periods keep theirs.</p>`));
+  };
+  return inp;
+}
+function openPaySheet(p, pb){
+  const s=openSheet("Pay · "+Periods.label(p)), pay=pb.pay;
+  const inp=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); inp.value=pay.source==="typed"?pay.amount:"";
+  inp.placeholder=String(pay.source==="typed"?"":pay.amount);
+  s.body.appendChild(el(`<p style="font-size:13px;margin:0 0 10px">Normally this is the salary received in the period${pay.received?" ("+money(pay.received)+")":""}; for a period that hasn't been paid yet, your last pay. Type an amount to use instead.</p>`));
+  s.body.appendChild(wizField("Pay for this period (£)", inp));
+  const row=el(`<div class="flex wrap" style="margin-top:12px"></div>`);
+  const ok=el(`<button class="btn pri">Save</button>`);
+  ok.onclick=()=>{
+    const v=parseFloat(inp.value);
+    if(inp.value.trim()!=="" && (isNaN(v)||v<0)){ toast("Enter an amount."); return; }
+    Model.setPay(DATA, p.key, inp.value.trim()===""?null:v); markDirty(); s.close(); render();
+  };
+  row.appendChild(ok);
+  if(pay.source==="typed"){ const a=el(`<button class="btn">Back to automatic</button>`); a.onclick=()=>{ Model.setPay(DATA, p.key, null); markDirty(); s.close(); render(); }; row.appendChild(a); }
+  s.body.appendChild(row);
+}
+// Paid early or late: move the payday that starts this period, or the next.
+function openPaydaySheet(p){
+  const cy=Model.cycleOf(DATA), nextKey=Periods.periodAt(cy, p.index+1).key, first=p.key===Model.startOf(DATA);
+  const s=openSheet("Paydays");
+  s.body.appendChild(el(`<p style="font-size:13px;margin:0 0 10px">If you're paid early or late (e.g. before a bank holiday), set the day the money arrived. Only that payday moves; the four-weekly rhythm carries on after it.</p>`));
+  const fl=el(`<div class="fields"></div>`);
+  const a=el(`<input type="date">`); a.value=p.start; a.disabled=first;
+  const b=el(`<input type="date">`); b.value=p.next;
+  fl.appendChild(wizField("This period's payday (usually "+dayName(p.key)+")", a));
+  fl.appendChild(wizField("Next payday (usually "+dayName(nextKey)+")", b));
+  s.body.appendChild(fl);
+  if(first) s.body.appendChild(el(`<p class="hint">The first payday is where the budget starts, so it can't move.</p>`));
+  const row=el(`<div class="flex wrap" style="margin-top:12px"></div>`);
+  const ok=el(`<button class="btn pri">Save</button>`);
+  ok.onclick=()=>{
+    const okA = first || Model.setPayday(DATA, p.key, a.value||null);
+    const okB = Model.setPayday(DATA, nextKey, b.value||null);
+    if(!okA||!okB){ toast("A payday can move by less than two weeks."); }
+    markDirty(); s.close(); render();
+  };
+  const reset=el(`<button class="btn">Usual dates</button>`);
+  reset.onclick=()=>{ if(!first) Model.setPayday(DATA, p.key, null); Model.setPayday(DATA, nextKey, null); markDirty(); s.close(); render(); };
+  row.append(ok, reset);
+  s.body.appendChild(row);
+}
+
+/* Dashboard once restarted. Pay period: the Budget tab's figures, and for
+   the current period what's safe to spend until payday. Week / month /
+   year / all: by bank date, with each pay period's budget counted for its
+   share of days in the range (Model.rangeReport). */
+function renderPPDashboard(m){
+  const today=Periods.localISO(), cy=Model.cycleOf(DATA), isPP=period.grain==="pp";
+  let r, from, to;
+  if(isPP){ r=Model.periodBudget(DATA, ppPeriod(), today); from=r.period.start; to=r.period.end; }
+  else { const [a,b]=rangeOf(); r=Model.rangeReport(DATA, a, b, today); from=r.from; to=r.to; }
+  const current = isPP && r.period.index===Periods.periodFor(cy, today).index;
+  const T=r.totals, saved=r.savings.saved, target=r.savings.target;
+
+  m.innerHTML="";
+  const head=el(`<div class="head"><h1>Dashboard</h1><span class="sub"></span><div class="spacer"></div></div>`);
+  head.querySelector(".sub").textContent="· "+periodLabel();
+  head.appendChild(periodControls(render));
+  m.appendChild(head);
+  const last=[...DATA.transactions,...DATA.income].reduce((a,x)=>x.date>a?x.date:a,"");
+  if(!last || Periods.diffDays(last,today)>7)
+    m.appendChild(el(`<div class="banner" style="margin-bottom:14px">${last?`The ledger runs to ${Periods.fmt(last)}`:`Nothing in the ledger since ${Periods.fmt(DATA.meta.startDate)} yet`} — import your latest statements so these numbers are up to date.</div>`));
+
+  const k=el(`<div class="grid kpis" style="margin-bottom:14px"></div>`);
+  const leftKpi=lab=>kpi(lab, money0(Math.abs(T.left)), T.left>=0?"under budget":"over budget", T.left>=0?"good":"bad", T.left<0?"−":"");
+  const savedKpi=()=>kpi("Saved", (saved<0?"−":"")+money0(Math.abs(saved)),
+    target>0 ? (saved>=target?"target "+money0(target)+" ✓":money0(target-saved)+" to go") : "no target", target>0&&saved>=target?"good":"");
+  if(current){
+    const u=Model.untilPayday(DATA, today);
+    k.appendChild(kpi("Safe to spend", money(u.safe), money(u.perDay)+" a day until payday", u.safe<0?"bad":"good"));
+    k.appendChild(kpi("Payday", Periods.fmt(u.period.next), u.daysLeft===1?"tomorrow":"in "+u.daysLeft+" days"));
+    k.appendChild(kpi("Budget left", money0(Math.abs(T.left)), T.left>=0?"of "+money0(T.budget)+" this period":"over budget", T.left>=0?"good":"bad", T.left<0?"−":""));
+    k.appendChild(kpi("Flex balance", money(u.flex), "current account", u.flex<0?"bad":""));
+    k.appendChild(kpi("Card owed", money(u.cardOwed), u.card>0?"in credit by "+money(u.card):"credit card"));
+    k.appendChild(kpi("Bills still due", money(u.billsDue), u.bills.length===1?"1 bill before payday":u.bills.length+" bills before payday"));
+  } else if(isPP){
+    const ps=r.pay.source;
+    k.appendChild(kpi("Spent", money0(T.spent), "bills and categories"));
+    k.appendChild(kpi("Budget", money0(T.budget), "bills and categories"));
+    k.appendChild(leftKpi("Left"));
+    k.appendChild(kpi("Pay", money0(r.pay.amount), ps==="typed"?"typed in ✏️":ps==="received"?"received":ps==="last"?"same as last pay":"no pay yet"));
+    k.appendChild(savedKpi());
+  } else {
+    const income=Object.values(r.flows.income).reduce((s,v)=>s+v,0), net=income-T.spent-saved;
+    k.appendChild(kpi("Spending", money0(T.spent), "bills and categories"));
+    k.appendChild(kpi("Budget", money0(T.budget), "share of each pay period's"));
+    k.appendChild(leftKpi("Remaining"));
+    k.appendChild(kpi("Income", money0(income), "salary "+money0(r.flows.income.Salary||0)));
+    k.appendChild(savedKpi());
+    k.appendChild(kpi("Net", (net<0?"−":"+")+money0(Math.abs(net)), "income − spending − saved", net<0?"bad":"good"));
+  }
+  m.appendChild(k);
+
+  if(current) m.appendChild(el(`<p class="muted" style="font-size:12px;margin:-4px 2px 14px">Safe to spend = Flex balance − what you owe on the card − bills still to pay before payday.</p>`));
+
+  // budget vs actual, laid out like the Budget tab
+  const row=el(`<div class="row2"></div>`);
+  const left=el(`<div class="card"><div class="pad" style="padding-bottom:0"><h3 class="sec">Budget vs actual</h3><div class="hint" style="margin:-4px 0 6px">Tap a category to see its rows.</div></div></div>`);
+  const w=el(`<div class="tablewrap fit"><table class="budget dash"><thead><tr><th>Category</th><th class="num">Budget</th><th class="num">Spent</th><th class="num">Left</th></tr></thead><tbody></tbody><tfoot></tfoot></table></div>`);
   const tb=w.querySelector("tbody");
-  DATA.bills.forEach((b,i)=>{
-    const tr=el(`<tr></tr>`);
-    const nameTd=el(`<td></td>`); const nameIn=el(`<input type="text" class="inline-in">`); nameIn.value=b.name;
-    nameIn.onchange=()=>{
-      const newName=nameIn.value.trim(); if(!newName || newName===b.name){ nameIn.value=b.name; return; }
-      const oldName=b.name; b.name=newName;
-      Object.values(DATA.monthlyBudgets).forEach(r=>{ if(r.bills[oldName]!=null){ r.bills[newName]=r.bills[oldName]; delete r.bills[oldName]; } });
-      markDirty(); render();
-    };
-    nameTd.appendChild(nameIn); tr.appendChild(nameTd);
-    tr.appendChild(inCell(b,"notes","text"));
-    const td=el(`<td class="right"></td>`); const del=el(`<button class="btn sm danger">✕</button>`);
-    del.onclick=()=>{ DATA.bills.splice(i,1); Object.values(DATA.monthlyBudgets).forEach(r=>{ delete r.bills[b.name]; }); markDirty(); render(); };
-    td.appendChild(del); tr.appendChild(td);
+  r.rows.forEach(x=>{
+    if(!x.fromBills && !x.budget && !x.spent) return;
+    const pct=x.budget>0?Math.min(100, x.spent/x.budget*100):(x.spent>0?100:0), over=x.left<0;
+    const tr=el(`<tr class="tap"><td><div class="nm"></div><div class="bar"><i style="width:${Math.max(0,pct).toFixed(0)}%;background:${over?"var(--bad)":catColor(x.category)}"></i></div></td><td class="num"></td><td class="num"></td><td class="num${over?" neg":""}"></td></tr>`);
+    tr.querySelector(".nm").textContent=x.category;
+    tr.children[1].textContent=money(x.budget); tr.children[2].textContent=money(x.spent); tr.children[3].textContent=money(x.left);
+    if(x.fromBills){ tr.title="Open the Bills tab"; tr.onclick=()=>{ view="bills"; render(); }; }
+    else { tr.title="Show these rows in the Ledger"; tr.onclick=()=>{ Object.assign(ledgerFilter,{cat:x.category,type:"All",status:"All"}); view="ledger"; render(); }; }
     tb.appendChild(tr);
   });
+  w.querySelector("tfoot").appendChild(el(`<tr><td><b>Total</b></td><td class="num"><b>${money(T.budget)}</b></td><td class="num"><b>${money(T.spent)}</b></td><td class="num${T.left<0?" neg":""}"><b>${money(T.left)}</b></td></tr>`));
+  left.appendChild(w);
+  const sv=el(`<div class="savrow"><div><div class="nm">Saved</div><div class="sub">transfers to savings − transfers back</div></div><div class="num"><b></b><div class="sub"></div></div><div class="num"></div></div>`);
+  sv.querySelector("b").textContent=money(saved);
+  sv.querySelector(".num .sub").textContent = target>0 ? "target "+money(target) : "no target";
+  sv.lastChild.textContent = target<=0 ? "" : saved>=target ? "✓" : money(target-saved)+" to go";
+  left.appendChild(sv);
+  row.appendChild(left);
+  const right=el(`<div class="grid" style="align-content:start"></div>`);
+  // bills come out on set days (rent early on), so pace is day-to-day spending only
+  const dd=r.rows.filter(x=>x.category!=="Bills"), ddSum=k=>dd.reduce((s,x)=>s+(+x[k]||0),0);
+  right.appendChild(paceCard(null, ddSum("budget"), ddSum("spent"), {start:parseD(from), end:parseD(to)}, "Pace · spending, not bills"));
+  right.appendChild(dashBillsCard(r.bills.items, isPP, r.bills.totals, today));
+  row.appendChild(right);
+  m.appendChild(row);
+
+  m.appendChild(ppTrendCard(r, from, to, today));
+  m.appendChild(merchantsCard(Model.spendItems(DATA, isPP ? x=>Model.rowPeriodKey(DATA,x)===r.period.key : x=>x.date>=from&&x.date<=to, r.billIds)));
+  m.appendChild(cashflowCard());
+  m.appendChild(netWorthCard());
+}
+// The bills due in the period or range; tap one to open its pay period on the Bills tab.
+function dashBillsCard(items, isPP, totals, today){
+  const c=el(`<div class="card pad"><h3 class="sec"></h3></div>`);
+  c.firstChild.textContent=isPP?"Bills this period":"Bills due";
+  if(!items.length){ c.appendChild(el(`<div class="muted" style="font-size:13px">No bills due ${isPP?"this period":"in this range"}.</div>`)); return c; }
+  const cy=Model.cycleOf(DATA), now=Periods.periodFor(cy, today);
+  const w=el(`<div class="tablewrap fit"><table class="dbills"><thead><tr><th>Bill</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody></tbody></table></div>`);
+  const tb=w.querySelector("tbody");
+  const add=i=>{
+    const st=billStatusText(i);
+    const tr=el(`<tr class="tap"><td><div class="nm"></div><div class="sub"></div></td><td class="num"></td><td><div class="status"></div></td></tr>`);
+    tr.querySelector(".nm").textContent=i.bill.name;
+    tr.querySelector(".sub").textContent="due "+Periods.fmt(i.date)+((i.version||{}).account==="Card"?" · card":"");
+    tr.children[1].textContent=i.reminder?(i.expected?money(i.expected):"reminder"):money(i.expected);
+    if(i.reminder) tr.classList.add("reminder");
+    const s=tr.querySelector(".status"); s.className="status "+st[0]; s.textContent=st[1];
+    tr.title="Open on the Bills tab";
+    tr.onclick=()=>{ const q=Periods.periodFor(cy, i.date); ppKey=q.index===now.index?null:q.key; view="bills"; render(); };
+    tb.appendChild(tr);
+  };
+  const LIMIT=8;
+  items.slice(0,LIMIT).forEach(add);
   c.appendChild(w);
-  const add=el(`<button class="btn sm" style="margin-top:10px">+ Add monthly bill type</button>`);
-  add.onclick=()=>{ const nm="New bill"; DATA.bills.push({name:nm,notes:""}); Object.values(DATA.monthlyBudgets).forEach(r=>{ r.bills[nm]=r.bills[nm]??0; }); markDirty(); render(); };
-  c.appendChild(add);
+  if(items.length>LIMIT){
+    const more=el(`<button class="btn sm" style="margin-top:8px"></button>`); more.textContent="Show all "+items.length;
+    more.onclick=()=>{ items.slice(LIMIT).forEach(add); more.remove(); };
+    c.appendChild(more);
+  }
+  const t=totals||{};
+  c.appendChild(el(`<div class="muted" style="font-size:12px;margin-top:8px">Due ${money(t.due)}${t.paid!=null?` · paid ${money(t.paid)} · ${money(t.toPay)} still to pay`:""}</div>`));
   return c;
 }
-function renderBudgetYearly(m){
-  const c=el(`<div class="card pad"><h3 class="sec">Yearly bills budget</h3><div class="muted" style="font-size:12px;margin-bottom:10px">A separate, non-monthly budget — one figure per bill for the whole year, reconciled against the whole year's payments on the Reconcile tab.</div></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Bill</th><th class="num">Budget /yr</th><th>Notes</th><th></th></tr></thead><tbody></tbody></table></div>`);
+const cumulative = a => { let s=0; return a.map(v=>s+=v); };
+// Spending in a pay period by day (0 = payday), adding up to the Budget tab's
+// "spent": rows counted in the period other than bill payments, plus what
+// paid each of its bills on the day paid (kept inside the period, so a bill
+// paid a day or two into the next period still counts in this one).
+// noBills: day-to-day spending only (no bill payments, nothing in Bills).
+function ppDaily(r, noBills){
+  const p=r.period, daily=new Array(p.days).fill(0);
+  const add=(iso,a)=>{ daily[Math.min(p.days-1, Math.max(0, Periods.diffDays(p.start, iso||p.start)))]+=a; };
+  Model.spendItems(DATA, x=>!r.billIds.has(x.id) && Model.rowPeriodKey(DATA,x)===p.key).forEach(x=>{ if(!(noBills && x.category==="Bills")) add(x.date, x.amount); });
+  if(noBills) return daily;
+  const seen=new Set();
+  r.bills.items.forEach(i=>{
+    if(i.reminder || i.status!=="paid") return;
+    if(i.how==="manual"){ add(i.paidDate, i.paidAmount); return; }
+    i.payments.forEach(x=>{ if(!seen.has(x.id)){ seen.add(x.id); add(x.date, +x.amount||0); } });
+  });
+  return daily;
+}
+function catLegend(cats, budget){
+  return el(`<div class="legend" style="margin-top:10px">${cats.map(c=>`<span><i style="background:${catColor(c)}"></i>${escHTML(c)}</span>`).join("")}${budget?`<span><i style="background:var(--bad)"></i>Budget</span>`:""}</div>`);
+}
+function ppTrendCard(r, from, to, today){
+  const c=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Trend</h3></div>`);
+  const g=period.grain, cy=Model.cycleOf(DATA);
+  const spentLegend=b=>el(`<div class="legend" style="margin-top:8px"><span><i style="background:var(--brand)"></i>Spent so far (incl. bills)</span><span><i style="background:var(--muted)"></i>Budget (${money0(b)})</span></div>`);
+  if(g==="pp"){
+    const p=r.period, n=today>=p.start&&today<=p.end ? Periods.diffDays(p.start,today)+1 : p.days;
+    const pts=cumulative(ppDaily(r)).slice(0,n);
+    c.appendChild(lineChart(pts, r.totals.budget, p.days, [Periods.fmt(p.start), Periods.fmt(p.end)]));
+    c.appendChild(spentLegend(r.totals.budget));
+    if(p.index>Periods.periodFor(cy, Model.startOf(DATA)).index){
+      // day-to-day spending only: bills land on fixed dates, so they'd swamp the comparison
+      const cur=cumulative(ppDaily(r,true));
+      const prev=cumulative(ppDaily(Model.periodBudget(DATA, Periods.periodAt(cy,p.index-1), today),true));
+      const day=Math.min(n, prev.length), a=cur[day-1]||0, b=prev[day-1]||0, diff=a-b;
+      c.appendChild(el(`<div class="muted" style="font-size:12px;margin-top:8px">By day ${day} your day-to-day spending (not bills) is <b style="color:${diff>0?"var(--bad)":"var(--good)"}">${money(Math.abs(diff))} ${diff>0?"more":"less"}</b> than by day ${day} of the pay period before (${money0(a)} vs ${money0(b)}).</div>`));
+    }
+    return c;
+  }
+  const days=Periods.diffDays(from,to)+1;
+  if(days<1){ c.appendChild(el(`<div class="muted">Nothing to show: the budget starts ${Periods.fmtY(DATA.meta.startDate)}.</div>`)); return c; }
+  // spending by bank date: rows (a payment that paid a bill counts in Bills)
+  // and bills marked paid by hand, on the day given
+  const items=Model.spendItems(DATA, x=>x.date>=from&&x.date<=to, r.billIds);
+  (r.bills.manual||[]).forEach(i=>items.push({date:i.paidDate, category:"Bills", amount:i.paidAmount}));
+  if(g==="month"){
+    const daily=new Array(days).fill(0);
+    items.forEach(x=>{ const d=Periods.diffDays(from,x.date); if(d>=0&&d<days) daily[d]+=x.amount; });
+    const n=today<from?1:today>to?days:Periods.diffDays(from,today)+1;
+    c.appendChild(lineChart(cumulative(daily).slice(0,n), r.totals.budget, days, [Periods.fmt(from), Periods.fmt(to)]));
+    c.appendChild(spentLegend(r.totals.budget));
+    return c;
+  }
+  let groups;
+  if(g==="week"){
+    const mon=rangeOf()[0];
+    groups=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((label,d)=>{
+      const iso=Periods.addDays(mon,d), o={};
+      items.forEach(x=>{ if(x.date===iso) o[x.category]=(o[x.category]||0)+x.amount; });
+      return {label, o};
+    });
+  } else {
+    // year / all: one bar per pay period (as on the Budget tab) starting in
+    // the range, up to now
+    const nowIdx=Periods.periodFor(cy, today).index;
+    groups=Periods.periodsBetween(cy, from, to).filter(p=>p.start>=from && p.index<=nowIdx).map(p=>{
+      const b=Model.periodBudget(DATA, p, today), o={};
+      b.rows.forEach(x=>{ o[x.category]=x.spent; });
+      return {label:Periods.fmt(p.start), o, budget:b.totals.budget};
+    });
+    c.firstChild.textContent="Spending per pay period";
+  }
+  const cats=[...new Set([...Model.spendCats(DATA), ...groups.flatMap(x=>Object.keys(x.o))])].filter(cat=>groups.some(x=>(x.o[cat]||0)>0.005));
+  c.appendChild(stackedBars(groups, cats));
+  c.appendChild(catLegend(cats, groups.some(x=>x.budget>0)));
+  return c;
+}
+// Bars of spending by category, one per group {label, o: {category: amount},
+// budget}; a dashed line marks a group's budget.
+function stackedBars(groups, cats){
+  const W=820,H=220,pad=34,gap=groups.length>10?6:12;
+  const tot=g=>cats.reduce((s,c)=>s+Math.max(0,g.o[c]||0),0);
+  const max=Math.max(1,...groups.map(g=>Math.max(tot(g), g.budget||0)));
+  const bw=(W-pad*2-gap*Math.max(0,groups.length-1))/Math.max(1,groups.length), sc=(H-pad*2)/max;
+  let svg=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto"><line x1="${pad}" y1="${H-pad}" x2="${W-pad}" y2="${H-pad}" stroke="var(--line)"/>`;
+  groups.forEach((g,i)=>{
+    const bx=pad+i*(bw+gap), mid=(bx+bw/2).toFixed(1); let yy=H-pad;
+    cats.forEach(c=>{ const h=Math.max(0,g.o[c]||0)*sc; if(h>0){ svg+=`<rect x="${bx.toFixed(1)}" y="${(yy-h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${catColor(c)}"/>`; yy-=h; } });
+    if(g.budget>0){ const by=(H-pad-g.budget*sc).toFixed(1); svg+=`<line x1="${bx.toFixed(1)}" y1="${by}" x2="${(bx+bw).toFixed(1)}" y2="${by}" stroke="var(--bad)" stroke-width="2" stroke-dasharray="3 2"/>`; }
+    svg+=`<text x="${mid}" y="${H-pad+15}" fill="var(--muted)" font-size="11" text-anchor="middle">${escHTML(g.label)}</text>`;
+    const t=tot(g); if(t>0) svg+=`<text x="${mid}" y="${(yy-5).toFixed(1)}" fill="var(--muted)" font-size="10" text-anchor="middle">${money0(t)}</text>`;
+  });
+  return el(svg+`</svg>`);
+}
+// Where the money went, grouped by the rule that matched (so "TESCO STORES
+// 2228" and "Tesco Stores 2889" land together), else by the name.
+function merchantsCard(items){
+  const c=el(`<div class="card pad" style="margin-top:14px"><h3 class="sec">Top merchants</h3></div>`);
+  const by={};
+  items.forEach(x=>{
+    const rule=Model.ruleFor(DATA.rules, x.row.name, "out");
+    const key=rule ? rule.match.replace(/\b\w/g,ch=>ch.toUpperCase()) : (x.row.name||"(unnamed)").slice(0,28);
+    const g=by[key]=by[key]||{amount:0, rows:new Set(), cats:{}};
+    g.amount+=x.amount; g.rows.add(x.row); g.cats[x.category]=(g.cats[x.category]||0)+x.amount;
+  });
+  const top=Object.entries(by).filter(([,g])=>g.amount>0.005).sort((a,b)=>b[1].amount-a[1].amount).slice(0,10);
+  if(!top.length){ c.appendChild(el(`<div class="muted">No spending in this period.</div>`)); return c; }
+  const w=el(`<div class="tablewrap fit"><table><thead><tr><th>Merchant</th><th>Category</th><th class="num">Visits</th><th class="num">Total</th></tr></thead><tbody></tbody></table></div>`);
   const tb=w.querySelector("tbody");
-  let total=0;
-  DATA.yearlyBills.forEach((b,i)=>{
-    total+=(+b.amount||0);
-    const tr=el(`<tr></tr>`);
-    tr.appendChild(inCell(b,"name","text"));
-    tr.appendChild(inCell(b,"amount","number"));
-    tr.appendChild(inCell(b,"notes","text"));
-    const td=el(`<td class="right"></td>`); const del=el(`<button class="btn sm danger">✕</button>`);
-    del.onclick=()=>{ DATA.yearlyBills.splice(i,1); markDirty(); render(); };
-    td.appendChild(del); tr.appendChild(td);
+  top.forEach(([name,g])=>{
+    const cat=Object.entries(g.cats).sort((a,b)=>b[1]-a[1])[0][0];
+    const tr=el(`<tr><td></td><td><span class="tag" style="font-size:10px"></span></td><td class="num muted">${g.rows.size}</td><td class="num">${money(g.amount)}</td></tr>`);
+    tr.children[0].textContent=name;
+    const tag=tr.querySelector(".tag"); tag.textContent=cat; tag.style.background=catColor(cat);
     tb.appendChild(tr);
   });
-  tb.appendChild(el(`<tr style="font-weight:700"><td>Yearly total</td><td class="num">${money(total)} <span class="muted" style="font-weight:400">(${money(total/12)}/mo)</span></td><td colspan="2"></td></tr>`));
   c.appendChild(w);
-  const add=el(`<button class="btn sm" style="margin-top:10px">+ Add yearly bill</button>`);
-  add.onclick=()=>{ DATA.yearlyBills.push({name:"New bill",amount:0,notes:""}); markDirty(); render(); };
+  return c;
+}
+
+// Data tab: the pay cycle, or the way into the restart.
+function payPeriodsCard(){
+  const c=el(`<div class="card pad" style="max-width:640px;margin-top:14px"><h3 class="sec">Pay periods</h3></div>`);
+  if(Model.isRestarted(DATA)){
+    const cy=Periods.normCycle(Model.cycleOf(DATA));
+    c.appendChild(el(`<p style="margin:0;font-size:13px">Restarted from payday <b>${Periods.fmtY(DATA.meta.startDate)}</b>, paid every ${cy.days} days. Rows from before then are in the archive copy saved at the restart.</p>`));
+  } else {
+    c.appendChild(el(`<p style="margin:0 0 10px;font-size:13px">You're paid every four weeks. The restart moves the budget to pay periods from your payday on <b>${Periods.fmtY(RESTART_START)}</b> and archives everything before it.</p>`));
+    const b=el(`<button class="btn pri">Restart from payday…</button>`); b.onclick=()=>{ view="restart"; render(); };
+    c.appendChild(b);
+  }
+  return c;
+}
+
+/* The restart wizard. Its choices live in `wiz`, so a re-render (or a change
+   arriving from another device) keeps what's been typed; nothing is saved
+   until "Restart the budget". Typing updates `wiz` and the totals and checks
+   in place, so inputs keep focus; ticking, adding or switching things
+   re-renders. */
+function renderRestart(m){
+  m.innerHTML="";
+  m.appendChild(el(`<div class="head"><h1>Restart from payday</h1><span class="sub">switch to four-weekly pay periods</span></div>`));
+  if(Model.isRestarted(DATA)){
+    wiz=null;
+    const c=el(`<div class="card pad" style="max-width:640px"><h3 class="sec">Already restarted</h3>
+      <p style="margin:0 0 12px">This budget restarted from payday ${Periods.fmtY(DATA.meta.startDate)}. That only happens once, so there's nothing to do here.</p></div>`);
+    const b=el(`<button class="btn pri">Go to Bills</button>`); b.onclick=()=>{ view="bills"; render(); };
+    c.appendChild(b); m.appendChild(c); return;
+  }
+  const pv=Model.restartPreview(DATA, RESTART_START, Periods.localISO());
+  wizState(pv);
+  const box=el(`<div class="wiz"></div>`);
+  box.appendChild(el(`<p class="muted" style="margin:0">Work down the steps. Nothing changes until you press <b>Restart the budget</b> at the end.</p>`));
+  [wizBackupCard, wizPeriodsCard, wizOpeningsCard, wizBillsCard, wizBudgetCard, wizReviewCard, wizRulesCard, wizConfirmCard]
+    .forEach(f=>box.appendChild(f(pv)));
+  m.appendChild(box);
+  refreshWiz();
+}
+function rerenderWiz(){ const y=window.scrollY; render(); window.scrollTo(0,y); }
+function wizState(pv){
+  if(!wiz) wiz={
+    backup:false, busy:false, error:"",
+    openings:{flex:"", card:""},
+    bills:pv.bills.map(b=>Object.assign({}, b, {dueDay:"", ydDay:"", ydMonth:""})),
+    budget:{cats:Object.assign({}, pv.budget.cats), savings:pv.budget.savings},
+    review:{},
+  };
+  // rows to sort can change if another device edits the ledger meanwhile
+  const keys=new Set();
+  pv.review.forEach(r=>{
+    const k=r.dir+":"+r.id, s=r.suggestion; keys.add(k);
+    if(!wiz.review[k]) wiz.review[k]=Object.assign({}, s && !(s.type==="Transfer" && s.other===Model.accountOf(r.row)) ? s : r.now);
+  });
+  Object.keys(wiz.review).forEach(k=>{ if(!keys.has(k)) delete wiz.review[k]; });
+  return wiz;
+}
+const wizChoices = () => ({start:RESTART_START, openings:wiz.openings, bills:wiz.bills, budget:wiz.budget, review:wiz.review});
+function wizProblems(){
+  const out=[], s=Store.status();
+  if(!wiz.backup) out.push("Download the backup (step 1).");
+  if(s.configured && s.state==="signed-out") out.push("Sign in on the Data tab first, so the restart is saved to the cloud.");
+  if(s.mode==="cloud" && s.state==="offline") out.push("You're offline — the restart needs a connection.");
+  return [...new Set(out.concat(Model.restartProblems(wizChoices())))];
+}
+function refreshWiz(){
+  if(!wiz) return;
+  const bt=document.getElementById("wizBillTotals"); if(bt) bt.textContent=wizBillTotals();
+  const bu=document.getElementById("wizBudgetTotal"); if(bu) bu.textContent=wizBudgetTotal();
+  document.querySelectorAll(".bill-hint").forEach(e=>{ e.textContent=e._bill?wizOverlap(e._bill):""; });
+  const ul=document.getElementById("wizProblems"), btn=document.getElementById("wizConfirm");
+  if(!ul||!btn) return;
+  const probs=wizProblems();
+  ul.innerHTML="";
+  probs.forEach(p=>{ const li=document.createElement("li"); li.textContent=p; ul.appendChild(li); });
+  if(!probs.length){ const li=document.createElement("li"); li.className="ok"; li.textContent="✓ Everything's ready."; ul.appendChild(li); }
+  btn.disabled = probs.length>0 || wiz.busy;
+}
+// a labelled field for the wizard's grids
+function wizField(label, input, cls){
+  const d=el(`<label class="fld${cls?" "+cls:""}"><span></span></label>`);
+  d.firstChild.textContent=label; d.appendChild(input);
+  return d;
+}
+
+function wizBackupCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">1 · Download a backup</h3>
+    <p>Saves your whole budget as it is now to a file on this device. The restart also keeps an archive copy (in the cloud when you're signed in), but a file of your own is the safest fallback.</p></div>`);
+  const row=el(`<div class="flex wrap" style="gap:10px"></div>`);
+  const b=el(`<button class="btn${wiz.backup?"":" pri"}">${wiz.backup?"Download again":"Download backup"}</button>`);
+  b.onclick=()=>{ download("budget-backup-"+Periods.localISO()+".json", JSON.stringify(DATA,null,1)); wiz.backup=true; rerenderWiz(); };
+  row.appendChild(b);
+  if(wiz.backup) row.appendChild(el(`<span class="ok-line">✓ Backup downloaded</span>`));
+  c.appendChild(row);
+  return c;
+}
+function wizPeriodsCard(pv){
+  const cy=Periods.DEFAULT_CYCLE, first=[0,1,2].map(n=>Periods.label(Periods.periodAt(cy,n)));
+  const wd=new Date(RESTART_START+"T12:00:00").toLocaleDateString("en-GB",{weekday:"long"});
+  const k=pv.counts.kept, a=pv.counts.archived;
+  const c=el(`<div class="card pad"><h3 class="sec">2 · Pay periods</h3>
+    <p>Payday is <b>${wd} ${Periods.fmtY(RESTART_START)}</b>, then every ${cy.days} days. Each pay period runs from a payday to the day before the next: ${first.join(" · ")} …</p>
+    <p class="muted" style="margin:0">Kept (on or after ${Periods.fmt(RESTART_START)}): <b>${k.out}</b> spends and <b>${k.in}</b> money in.
+      Archived (before): <b>${a.out}</b> spends and <b>${a.in}</b> money in — safe in the archive copy, but no longer in the budget.</p></div>`);
+  if(!k.out && !k.in) c.appendChild(el(`<p class="hint" style="margin:8px 0 0">Nothing is dated on or after ${Periods.fmt(RESTART_START)} yet. After the restart, import your statements from ${Periods.fmtY(RESTART_START)} onwards.</p>`));
+  return c;
+}
+function wizOpeningsCard(pv){
+  const c=el(`<div class="card pad"><h3 class="sec">3 · Opening balances</h3>
+    <p>What each account held at the close of <b>${Periods.fmtY(pv.close)}</b>, the day before payday — take them from your statements. For the card, enter what you owed as a minus (owing £250 → −250).</p></div>`);
+  const f=el(`<div class="fields"></div>`);
+  [["flex","FlexGraduate"],["card","Member Credit Card"]].forEach(([key,label])=>{
+    const ledger=pv.openings[key];
+    const inp=el(`<input type="number" step="0.01" placeholder="from your statement">`); inp.value=wiz.openings[key];
+    const fld=wizField(label, inp);
+    const hint=el(`<div class="hint"></div>`);
+    hint.appendChild(document.createTextNode("Ledger says "+money(ledger)+" "));
+    const use=el(`<button type="button" class="btn sm">Use this</button>`);
+    hint.appendChild(use);
+    const diff=el(`<div class="hint warn"></div>`);
+    const showDiff=()=>{
+      const v=parseFloat(inp.value);
+      diff.textContent = isNaN(v)||Math.abs(v-ledger)<0.005 ? "" : "Differs from the ledger by "+money(Model.round2(v-ledger))+". That's fine — the budget starts from your figure.";
+    };
+    inp.oninput=()=>{ wiz.openings[key]=inp.value; showDiff(); refreshWiz(); };
+    use.onclick=e=>{ e.preventDefault(); inp.value=ledger.toFixed(2); inp.oninput(); };
+    showDiff();
+    const d=el(`<div></div>`); d.appendChild(fld); d.appendChild(hint); d.appendChild(diff);
+    f.appendChild(d);
+  });
+  c.appendChild(f);
+  return c;
+}
+function wizBillsCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">4 · Bills</h3>
+    <p>Your regular bills at this month's budgeted amounts. Untick any you no longer pay, and set the day each one leaves your account. You can change all of this later on the Bills tab.</p></div>`);
+  wiz.bills.forEach(b=>c.appendChild(wizBillBlock(b)));
+  const add=el(`<button class="btn sm">+ Add bill</button>`);
+  add.onclick=()=>{
+    const nb={id:Model.newBillId("bill", wiz.bills), name:"", notes:"", match:"", freq:"monthly", amount:"", dueDay:"", dueDate:null,
+      ydDay:"", ydMonth:"", account:"Flex", reminder:false, include:true, added:true};
+    const ri=wiz.bills.findIndex(x=>x.reminder);
+    wiz.bills.splice(ri<0?wiz.bills.length:ri, 0, nb);
+    rerenderWiz();
+  };
   c.appendChild(add);
-  m.appendChild(c);
+  c.appendChild(el(`<div class="wiz-total" id="wizBillTotals"></div>`));
+  return c;
 }
-// net of any income assigned to the same category that month (a reimbursement, refund...)
-function actualForMonth(mk,cat){
-  const spend=DATA.transactions.filter(t=>monthKey(t.date)===mk).reduce((s,t)=>s+catAmount(t,cat),0);
-  const inc=DATA.income.filter(t=>monthKey(t.date)===mk).reduce((s,t)=>s+srcAmount(t,cat),0);
-  return spend-inc;
+function wizBillBlock(b){
+  const blk=el(`<div class="wiz-bill${b.include?"":" off"}"></div>`);
+  const top=el(`<div class="top"></div>`);
+  const chk=el(`<input type="checkbox" aria-label="Include this bill">`); chk.checked=!!b.include;
+  chk.onchange=()=>{ b.include=chk.checked; rerenderWiz(); };
+  const name=el(`<input type="text" placeholder="Bill name" aria-label="Bill name">`); name.value=b.name||"";
+  name.oninput=()=>{ b.name=name.value; if(b.added) b.id=Model.newBillId(b.name||"bill", wiz.bills.filter(x=>x!==b)); refreshWiz(); };
+  top.appendChild(chk); top.appendChild(name);
+  if(!b.include){
+    const s=el(`<span class="muted" style="white-space:nowrap;font-size:13px"></span>`);
+    s.textContent = b.reminder ? "reminder" : money(+b.amount||0)+(b.freq==="yearly"?" a year":" a month");
+    top.appendChild(s);
+  }
+  if(b.added){ const x=el(`<button class="btn sm danger" title="Remove this bill">✕</button>`); x.onclick=()=>{ wiz.bills.splice(wiz.bills.indexOf(b),1); rerenderWiz(); }; top.appendChild(x); }
+  blk.appendChild(top);
+  if(!b.include) return blk;
+
+  if(b.reminder) blk.appendChild(el(`<div class="hint" style="margin:0 0 10px">A reminder only: paying off the card moves your own money, so it's never counted in bills.</div>`));
+  const f=el(`<div class="fields"></div>`);
+  if(!b.reminder){
+    const amt=el(`<input type="number" step="0.01" min="0" inputmode="decimal">`); amt.value=b.amount??"";
+    amt.oninput=()=>{ b.amount=amt.value; refreshWiz(); };
+    f.appendChild(wizField("Amount (£)", amt));
+    const fr=el(`<select><option value="monthly">Monthly</option><option value="yearly">Yearly</option></select>`); fr.value=b.freq;
+    fr.onchange=()=>{ b.freq=fr.value; rerenderWiz(); };
+    f.appendChild(wizField("How often", fr));
+  }
+  if(b.freq==="yearly"){
+    const wrap=el(`<span class="flex" style="gap:6px"></span>`);
+    const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="Day" aria-label="Day" style="width:5.5em">`); dd.value=b.ydDay||"";
+    const mm=el(`<select aria-label="Month"><option value="">Month</option></select>`);
+    Periods.MONTHS.forEach((mo,i)=>{ const o=document.createElement("option"); o.value=String(i+1); o.textContent=mo; mm.appendChild(o); });
+    mm.value=b.ydMonth||"";
+    const upd=()=>{
+      b.ydDay=dd.value; b.ydMonth=mm.value;
+      b.dueDate = dd.value && mm.value ? mm.value.padStart(2,"0")+"-"+dd.value.padStart(2,"0") : null;
+      refreshWiz();
+    };
+    dd.oninput=upd; mm.onchange=upd;
+    wrap.appendChild(dd); wrap.appendChild(mm);
+    f.appendChild(wizField("Due date", wrap));
+  } else {
+    const dd=el(`<input type="number" min="1" max="31" step="1" inputmode="numeric" placeholder="1–31">`); dd.value=b.dueDay??"";
+    dd.oninput=()=>{ b.dueDay=dd.value; refreshWiz(); };
+    f.appendChild(wizField("Due day of the month", dd));
+  }
+  if(!b.reminder){
+    const ac=el(`<select><option value="Flex">Flex</option><option value="Card">Credit card</option></select>`); ac.value=b.account==="Card"?"Card":"Flex";
+    ac.onchange=()=>{ b.account=ac.value; refreshWiz(); };
+    f.appendChild(wizField("Paid from", ac));
+  }
+  const mt=el(`<input type="text" placeholder="words from the statement line">`); mt.value=b.match||"";
+  mt.oninput=()=>{ b.match=mt.value; refreshWiz(); };
+  f.appendChild(wizField("Statement text (blank: link payments by hand)", mt, "wide"));
+  const nt=el(`<input type="text" placeholder="optional">`); nt.value=b.notes||"";
+  nt.oninput=()=>{ b.notes=nt.value; };
+  f.appendChild(wizField("Notes", nt, "wide"));
+  blk.appendChild(f);
+  const h=el(`<div class="hint warn bill-hint"></div>`); h._bill=b;
+  blk.appendChild(h);
+  return blk;
 }
-/* ---------- BILLS tab ---------- */
-function billNames(){ return [...DATA.bills, ...DATA.yearlyBills].map(b=>b.name).filter(Boolean); }
+// Bills whose statement texts overlap: a payment holding both goes to the
+// closer amount, then the closer date (Model.billTimeline).
+function wizOverlap(b){
+  if(!b.include) return "";
+  const text=x=>String(x.match||"").trim().toLowerCase(), t=text(b), acc=x=>x.account==="Card"?"Card":"Flex";
+  if(!t) return "";
+  const names=wiz.bills.filter(x=>x!==b && x.include && acc(x)===acc(b) && text(x) && (text(x).includes(t)||t.includes(text(x))))
+    .map(x=>x.name||"an unnamed bill");
+  return names.length ? "Statement text overlaps with "+names.join(", ")+": a payment matching both goes to the closest amount, then the closest date." : "";
+}
+function wizBillTotals(){
+  let mo=0, yr=0;
+  wiz.bills.forEach(b=>{ if(!b.include||b.reminder) return; const a=+b.amount||0; if(b.freq==="yearly") yr+=a; else mo+=a; });
+  const per=Periods.smoothedPerPeriod(mo,"monthly")+Periods.smoothedPerPeriod(yr,"yearly");
+  return "Monthly bills "+money(mo)+" · yearly "+money(yr)+" · about "+money(per)+" per pay period on average";
+}
+function wizBudgetCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">5 · Budget per pay period</h3>
+    <p>What you plan to spend in each pay period, outside bills. Started from September's budget × 12/13 (13 pay periods a year), rounded. You can set a different amount for any one period later.</p></div>`);
+  const f=el(`<div class="fields"></div>`);
+  Object.keys(wiz.budget.cats).forEach(cat=>{
+    const inp=el(`<input type="number" step="1" min="0" inputmode="decimal">`); inp.value=wiz.budget.cats[cat];
+    inp.oninput=()=>{ wiz.budget.cats[cat]=inp.value; refreshWiz(); };
+    f.appendChild(wizField(cat, inp));
+  });
+  const sv=el(`<input type="number" step="1" min="0" inputmode="decimal">`); sv.value=wiz.budget.savings;
+  sv.oninput=()=>{ wiz.budget.savings=sv.value; refreshWiz(); };
+  f.appendChild(wizField("Savings target", sv));
+  c.appendChild(f);
+  c.appendChild(el(`<div class="wiz-total" id="wizBudgetTotal"></div>`));
+  return c;
+}
+function wizBudgetTotal(){
+  const spend=Object.keys(wiz.budget.cats).reduce((s,k)=>s+(+wiz.budget.cats[k]||0),0), sav=+wiz.budget.savings||0;
+  return "Spending "+money(spend)+" + savings "+money(sav)+" = "+money(spend+sav)+" per pay period";
+}
+function wizReviewCard(pv){
+  const c=el(`<div class="card pad"><h3 class="sec">6 · Rows to sort</h3></div>`);
+  if(!pv.review.length){ c.appendChild(el(`<p class="muted" style="margin:0">Nothing to sort — every row being kept has a clear type.</p>`)); return c; }
+  c.appendChild(el(`<p>These rows were in "Other", or are money in from an unclear source. Choose what each one really was; any you leave keep the choice shown.</p>`));
+  const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">Amount</th><th>What it was</th></tr></thead><tbody></tbody></table></div>`);
+  const tb=w.querySelector("tbody");
+  pv.review.forEach(r=>{
+    const k=r.dir+":"+r.id, own=Model.accountOf(r.row);
+    const tr=el(`<tr><td class="muted" style="white-space:nowrap">${fmtDate(r.row.date)}</td><td></td><td class="num"></td><td></td></tr>`);
+    tr.children[1].textContent=(r.row.name||"")+(own==="Card"?" · card":"");
+    tr.children[2].textContent=(r.dir==="in"?"+":"−")+money(+r.row.amount||0);
+    const sel=kindSelect(r.dir, wiz.review[k], own, {spend:Model.SPEND_CATS, income:Model.INCOME_CATS});
+    sel.onchange=()=>{ wiz.review[k]=parseKind(sel.value); refreshWiz(); };
+    tr.children[3].appendChild(sel);
+    tb.appendChild(tr);
+  });
+  c.appendChild(w);
+  return c;
+}
+function wizRulesCard(pv){
+  const xfers=pv.rules.filter(r=>r.transfer), other=pv.rules.filter(r=>r.category==="Other").length;
+  const c=el(`<div class="card pad"><h3 class="sec">7 · Rules</h3>
+    <p>${pv.rules.length} rules carry over, renamed to the new categories. Rules for moving your own money become transfers:</p></div>`);
+  const ul=el(`<ul class="wiz-list"></ul>`);
+  xfers.forEach(r=>{ const li=document.createElement("li"); li.textContent=`"${r.match}" → ${r.transfer==="Card"?"card repayment":"transfer to or from "+(ACCOUNT_WORD[r.transfer]||r.transfer)}`; ul.appendChild(li); });
+  c.appendChild(ul);
+  if(other) c.appendChild(el(`<p class="muted" style="margin:8px 0 0">${other} rule${other===1?" points":"s point"} at Other — you may want to re-point ${other===1?"it":"them"} on the Rules tab afterwards.</p>`));
+  return c;
+}
+function wizConfirmCard(){
+  const c=el(`<div class="card pad"><h3 class="sec">8 · Restart</h3></div>`);
+  c.appendChild(el(`<ul class="wiz-list problems" id="wizProblems"></ul>`));
+  c.appendChild(el(`<p>This replaces the live budget with the new one and keeps the old one as an archive. <b>It can't be undone in the app.</b> If the budget is open on another device, reload it there first.</p>`));
+  const b=el(`<button class="btn pri" id="wizConfirm">Restart the budget</button>`);
+  b.onclick=confirmRestart;
+  c.appendChild(b);
+  if(wiz.error){ const e=el(`<div class="banner bad" style="margin-top:12px"></div>`); e.textContent=wiz.error; c.appendChild(e); }
+  return c;
+}
+async function confirmRestart(){
+  if(!wiz || wiz.busy || Model.isRestarted(DATA)) return;
+  const pv=Model.restartPreview(DATA, RESTART_START, Periods.localISO());
+  wizState(pv);
+  if(wizProblems().length){ rerenderWiz(); return; }
+  const arch=pv.counts.archived.out+pv.counts.archived.in;
+  if(!confirm(`Restart the budget from payday ${Periods.fmtY(RESTART_START)}?\n\n${arch} earlier rows move to the archive. This can't be undone in the app.`)) return;
+  wiz.busy=true; wiz.error=""; refreshWiz();
+  const overlay=el(`<div class="modal-bg"><div class="modal"><h3 style="margin:0 0 6px">Restarting…</h3>
+    <p class="muted" style="margin:0;font-size:13px">Saving the archive and the new budget. Keep this page open.</p></div></div>`);
+  document.body.appendChild(overlay);
+  try{
+    flushAppSave();
+    const next=Model.restartDoc(DATA, wizChoices());
+    const res=await Store.restart(DATA, next);
+    DATA=migrate(next); dirty=false; wiz=null; view="bills";
+    afterLoad();
+    toast("Restarted from payday "+Periods.fmt(RESTART_START)+". The old budget is kept as "+res.archiveKey+".");
+  }catch(e){
+    if(wiz){ wiz.busy=false; wiz.error=(e&&e.message)||String(e); }
+    rerenderWiz();
+  }finally{
+    overlay.remove();
+  }
+}
+
+/* ---------- bill helpers still used by the pre-restart dashboard + Accounts ---------- */
 function guessBill(name){
   const n=(name||"").toLowerCase();
   for(const b of [...DATA.bills, ...DATA.yearlyBills]){
@@ -1072,179 +1967,6 @@ function billBaseAmount(t){
 function billAllocations(t){
   if(t.billSplits && t.billSplits.length) return t.billSplits.filter(s=>s.bill);
   const b=billOf(t); return b ? [{bill:b, amount:billBaseAmount(t)}] : [];
-}
-function billAssigned(t){ return billAllocations(t).reduce((s,a)=>s+(+a.amount||0),0); }
-function billUnassigned(t){ return Math.round((t.amount - billAssigned(t))*100)/100; }
-function billSelect(cur){
-  const s=el(`<select class="sel-cat"></select>`);
-  const o0=document.createElement("option"); o0.value=""; o0.textContent="— unassigned"; s.appendChild(o0);
-  billNames().forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;o.selected=n===cur;s.appendChild(o);});
-  if(cur && !billNames().includes(cur)){const o=document.createElement("option");o.value=cur;o.textContent=cur;o.selected=true;s.appendChild(o);}
-  return s;
-}
-function billStatus(expected, actual){
-  if(Math.abs(actual)<0.005) return {icon:"⬜", cls:"muted", label:"not seen"};
-  const diff=Math.round(Math.abs(actual-expected)*100)/100;
-  if(diff <= Math.max(2, expected*0.1)) return {icon:"✓", cls:"good", label:"matches"};
-  return {icon:"⚠", cls:"warn", label:(actual>expected?"over by ":"under by ")+money(diff)};
-}
-let billMonth=null;
-function billPayments(){ return DATA.transactions.filter(t=>catAmount(t,"Bills")>0.005); }
-function billIncome(){ return DATA.income.filter(t=>srcAmount(t,"Bills")>0.005); }
-function availBillMonths(){
-  const s=new Set([...billPayments(),...billIncome()].map(t=>monthKey(t.date)));
-  const arr=[...s].sort(); return arr.length?arr:availableMonths();
-}
-function billPaidFor(name, rows){ return rows.reduce((s,t)=> s + billAllocations(t).filter(a=>a.bill===name).reduce((x,a)=>x+(+a.amount||0),0), 0); }
-function isYearlyBill(name){ return DATA.yearlyBills.some(b=>b.name===name); }
-function isYearlyAssigned(t){ return billAllocations(t).some(a=>isYearlyBill(a.bill)); }
-// A single payment can be split across BOTH a yearly bill and monthly ones (e.g. one
-// transfer covering Water(yearly) + Council Tax + Broadband). Classify by what a row
-// CONTAINS, not all-or-nothing, so each section still sees its own portions.
-function hasYearlyPart(t){ return billAllocations(t).some(a=>a.bill && isYearlyBill(a.bill)); }
-function hasMonthlyPart(t){
-  const al=billAllocations(t);
-  if(!al.length) return true;                       // unassigned - needs sorting in the monthly view
-  return al.some(a=>a.bill && !isYearlyBill(a.bill)) || billUnassigned(t)>0.005;
-}
-// the portion of a row belonging to monthly bills / to yearly bills
-function monthlyPartAmount(t){ return billAllocations(t).filter(a=>a.bill&&!isYearlyBill(a.bill)).reduce((s,a)=>s+(+a.amount||0),0) || (billAllocations(t).length?0:billBaseAmount(t)); }
-function yearlyPartAmount(t){ return billAllocations(t).filter(a=>a.bill&&isYearlyBill(a.bill)).reduce((s,a)=>s+(+a.amount||0),0); }
-// the split-or-dropdown cell, reused by both ledgers
-function billAssignCell(t){
-  const td=el(`<td></td>`);
-  if(t.billSplits && t.billSplits.length){
-    const parts=t.billSplits.filter(s=>s.bill).map(s=>`${escHTML(s.bill)} ${money(s.amount)}`).join(" · ");
-    const u=billUnassigned(t);
-    const box=el(`<span class="flex" style="gap:8px;flex-wrap:wrap"><span><b>Split:</b> ${parts}${u>0.005?` <span style="color:var(--warn)">· ${money(u)} unallocated</span>`:''}</span></span>`);
-    const edit=el(`<button class="btn sm">edit split</button>`); edit.onclick=()=>splitModal(t); box.appendChild(edit); td.appendChild(box);
-  } else {
-    const wrap=el(`<span class="flex" style="gap:6px"></span>`);
-    const sel=billSelect(billOf(t)); sel.onchange=()=>{ t.bill=sel.value; markDirty(); render(); }; wrap.appendChild(sel);
-    const sp=el(`<button class="btn sm" title="split across bills">split</button>`); sp.onclick=()=>splitModal(t); wrap.appendChild(sp);
-    td.appendChild(wrap);
-  }
-  return td;
-}
-function billReconcileCard(title, bills, txs, incs, expectedFn, hideZero, toggleHideZero){
-  const c=el(`<div class="card pad" style="margin-bottom:14px"><h3 class="sec">${escHTML(title)}</h3></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Bill</th><th class="num">Expected</th><th class="num">Paid</th><th class="num">In</th><th class="num">Net</th><th>Status</th></tr></thead><tbody></tbody></table></div>`);
-  const tb=w.querySelector("tbody");
-  let tE=0,tP=0,tI=0,tN=0; const hidden=[];
-  bills.forEach(b=>{
-    const expected=(expectedFn?expectedFn(b):b.amount), paid=billPaidFor(b.name,txs), inc=billPaidFor(b.name,incs), net=Math.round((paid-inc)*100)/100;
-    tE+=expected;tP+=paid;tI+=inc;tN+=net;
-    if(hideZero && expected===0 && paid===0 && inc===0){ hidden.push(b.name); return; }
-    const st=billStatus(expected, net);
-    const tr=el(`<tr></tr>`);
-    tr.innerHTML=`<td>${escHTML(b.name)}</td><td class="num muted">${money(expected)}</td>
-      <td class="num">${money(paid)}</td><td class="num" style="color:${inc?'var(--good)':'var(--muted)'}">${inc?money(inc):'–'}</td>
-      <td class="num"><b>${money(net)}</b></td><td style="color:var(--${st.cls})">${st.icon} ${st.label}</td>`;
-    tb.appendChild(tr);
-  });
-  // anything paid/received against a bill not in this frequency group, or unassigned
-  let uT=0,uN=0; [...txs,...incs].forEach(t=>{ const u=billUnassigned(t); if(u>0.005){uT+=u;uN++;} });
-  if(uN) tb.appendChild(el(`<tr style="color:var(--warn)"><td>⚠ Unassigned</td><td></td><td></td><td></td><td class="num">${money(uT)}</td><td>${uN} row${uN>1?'s':''} — assign below</td></tr>`));
-  tb.appendChild(el(`<tr style="font-weight:700"><td>Total</td><td class="num">${money(tE)}</td><td class="num">${money(tP)}</td><td class="num">${money(tI)}</td><td class="num">${money(tN)}</td><td></td></tr>`));
-  c.appendChild(w);
-  if(toggleHideZero){
-    if(hidden.length){
-      const btn=el(`<button class="btn sm" style="margin-top:10px">Show ${hidden.length} bill${hidden.length>1?'s':''} with nothing this period (${hidden.join(", ")})</button>`);
-      btn.onclick=toggleHideZero; c.appendChild(btn);
-    } else if(!hideZero){
-      const btn=el(`<button class="btn sm" style="margin-top:10px">Hide bills with nothing this period</button>`);
-      btn.onclick=toggleHideZero; c.appendChild(btn);
-    }
-  }
-  return c;
-}
-function billLedgerCard(title, rows, portionFn){
-  const c=el(`<div class="card pad" style="margin-bottom:14px"><h3 class="sec">${escHTML(title)}</h3></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">Out</th><th class="num">In</th><th>Bill type</th></tr></thead><tbody></tbody></table></div>`);
-  const tb=w.querySelector("tbody");
-  rows.slice().sort((a,b)=>b.t.date.localeCompare(a.t.date)).forEach(({t,isInc})=>{
-    const tr=el(`<tr></tr>`); if(billUnassigned(t)>0.005) tr.className="needs";
-    tr.appendChild(el(`<td class="muted" style="white-space:nowrap">${fmtDate(t.date)}</td>`));
-    tr.appendChild(el(`<td>${escHTML(t.name||"")}</td>`));
-    // when a payment straddles monthly+yearly bills, show only this section's share
-    const full=billBaseAmount(t), part=portionFn?portionFn(t):full;
-    const billAmt = (Math.abs(part-full)>0.005 && part>0) ? part : full;
-    tr.appendChild(el(`<td class="num" style="color:var(--bad)">${isInc?'':money(billAmt)}</td>`));
-    tr.appendChild(el(`<td class="num" style="color:var(--good)">${isInc?money(billAmt):''}</td>`));
-    tr.appendChild(billAssignCell(t));
-    tb.appendChild(tr);
-  });
-  if(!rows.length) tb.appendChild(el(`<tr><td colspan="5" class="empty">Nothing here yet.</td></tr>`));
-  c.appendChild(w); return c;
-}
-function renderBudgetReconcile(m){
-  if(!billMonth || !availBillMonths().includes(billMonth)) billMonth=availBillMonths().slice(-1)[0];
-  const bar=el(`<div class="card pad flex wrap" style="margin-bottom:14px;gap:10px;align-items:center"></div>`);
-  bar.appendChild(el(`<span class="muted">Reconcile month:</span>`));
-  const msel=el(`<select></select>`);
-  availBillMonths().forEach(k=>{const o=document.createElement("option");o.value=k;o.textContent=monthLabel(k);o.selected=k===billMonth;msel.appendChild(o);});
-  msel.onchange=()=>{billMonth=msel.value;render();}; bar.appendChild(msel);
-  const auto=el(`<button class="btn sm">Auto-assign by name</button>`);
-  auto.onclick=()=>{ let n=0; [...billPayments(),...billIncome()].forEach(t=>{ if(!t.bill && !(t.billSplits&&t.billSplits.length)){ const g=guessBill(t.name); if(g){t.bill=g;n++;} } }); markDirty(); render(); };
-  bar.appendChild(auto); m.appendChild(bar);
-
-  // ---- monthly reconcile: Expected comes from THAT month's own independent bill budget ----
-  const mTx = billPayments().filter(t=>monthKey(t.date)===billMonth && hasMonthlyPart(t));
-  const mInc = billIncome().filter(t=>monthKey(t.date)===billMonth && hasMonthlyPart(t));
-  m.appendChild(billReconcileCard("Monthly bills · "+monthLabel(billMonth), DATA.bills, mTx, mInc, b=>billBudget(billMonth,b.name),
-    reconcileHideZeroMonthly, ()=>{ reconcileHideZeroMonthly=!reconcileHideZeroMonthly; render(); }));
-  m.appendChild(billLedgerCard(monthLabel(billMonth)+" — assign each payment to a bill",
-    [...mTx.map(t=>({t,isInc:false})),...mInc.map(t=>({t,isInc:true}))], monthlyPartAmount));
-
-  // ---- yearly reconcile: Expected comes from the separate yearly bills budget ----
-  if(DATA.yearlyBills.length){
-    const year=billMonth.slice(0,4);
-    const yTx = billPayments().filter(t=>t.date.slice(0,4)===year && hasYearlyPart(t));
-    const yInc = billIncome().filter(t=>t.date.slice(0,4)===year && hasYearlyPart(t));
-    m.appendChild(el(`<div style="height:6px"></div>`));
-    m.appendChild(billReconcileCard("Yearly bills · "+year, DATA.yearlyBills, yTx, yInc, b=>b.amount,
-      reconcileHideZeroYearly, ()=>{ reconcileHideZeroYearly=!reconcileHideZeroYearly; render(); }));
-    m.appendChild(billLedgerCard("Yearly bill payments in "+year+" — assign a payment to a yearly bill",
-      [...yTx.map(t=>({t,isInc:false})),...yInc.map(t=>({t,isInc:true}))], yearlyPartAmount));
-  }
-}
-function splitModal(t){
-  const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Split payment across bills</h3></div></div>`);
-  const md=bg.querySelector(".modal");
-  md.appendChild(el(`<div class="muted" style="font-size:13px;margin-bottom:12px">${escHTML(t.name||"")} · <b>${money(t.amount)}</b> · ${fmtDate(t.date)}</div>`));
-  let allocs = (t.billSplits && t.billSplits.length) ? t.billSplits.map(s=>({bill:s.bill,amount:+s.amount||0}))
-             : (billOf(t) ? [{bill:billOf(t),amount:t.amount}] : [{bill:"",amount:t.amount}]);
-  const list=el(`<div></div>`); md.appendChild(list);
-  const rem=el(`<div style="font-size:13px;margin:8px 0"></div>`); md.appendChild(rem);
-  function updateRem(){ const sum=allocs.reduce((s,a)=>s+(+a.amount||0),0); const r=Math.round((t.amount-sum)*100)/100;
-    rem.innerHTML = Math.abs(r)<0.005 ? `<span style="color:var(--good)">✓ fully allocated</span>` : `Left to allocate: <b style="color:var(--warn)">${money(r)}</b>`; }
-  function refresh(){
-    list.innerHTML="";
-    allocs.forEach((a,i)=>{
-      const row=el(`<div class="flex" style="gap:8px;margin-bottom:8px"></div>`);
-      const sel=billSelect(a.bill); sel.style.flex="1"; sel.onchange=()=>{a.bill=sel.value;};
-      const amt=el(`<input type="number" step="0.01" style="width:120px;text-align:right">`); amt.value=a.amount; amt.oninput=()=>{a.amount=parseFloat(amt.value)||0;updateRem();};
-      const del=el(`<button class="btn sm danger">✕</button>`); del.onclick=()=>{allocs.splice(i,1);refresh();};
-      row.appendChild(sel); row.appendChild(amt); row.appendChild(del); list.appendChild(row);
-    });
-    updateRem();
-  }
-  const addBtn=el(`<button class="btn sm">+ Add bill</button>`); addBtn.onclick=()=>{allocs.push({bill:"",amount:Math.max(0,Math.round((t.amount-allocs.reduce((s,a)=>s+(+a.amount||0),0))*100)/100)});refresh();}; md.appendChild(addBtn);
-  const foot=el(`<div class="flex" style="justify-content:space-between;gap:10px;margin-top:16px"></div>`);
-  const clr=el(`<button class="btn">Remove split</button>`); clr.onclick=()=>{ delete t.billSplits; t.bill=(allocs.find(a=>a.bill)||{}).bill||""; markDirty(); bg.remove(); render(); };
-  const right=el(`<div class="flex" style="gap:10px"></div>`);
-  const cancel=el(`<button class="btn">Cancel</button>`); cancel.onclick=()=>bg.remove();
-  const save=el(`<button class="btn pri">Save</button>`); save.onclick=()=>{
-    const clean=allocs.filter(a=>a.bill && (+a.amount)>0).map(a=>({bill:a.bill,amount:Math.round((+a.amount)*100)/100}));
-    if(clean.length<=1){ t.bill=clean[0]?clean[0].bill:""; delete t.billSplits; }
-    else { t.billSplits=clean; t.bill=""; }
-    markDirty(); bg.remove(); render();
-  };
-  right.appendChild(cancel); right.appendChild(save);
-  foot.appendChild(clr); foot.appendChild(right); md.appendChild(foot);
-  refresh();
-  bg.onclick=e=>{if(e.target===bg)bg.remove();};
-  document.body.appendChild(bg);
 }
 function inCell(obj,key,type){
   const td=el(`<td class="${type==='number'?'num':''}"></td>`);
@@ -1345,27 +2067,60 @@ function buildImportPreview(text){
     if(best){keys[best.k]--;return true;} return false; }
   const iso=dt=>dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
 
-  const newTx=[],newInc=[]; let dupes=0,skipped=0,beforeCut=0;
+  const newTx=[],newInc=[]; let dupes=0,skipped=0,beforeCut=0,beforeStart=0;
+  // After the restart, rows before its payday belong to the archive: never add them,
+  // even when re-scanning everything.
+  const startIso = Model.isRestarted(DATA) ? DATA.meta.startDate : null;
+  // Restarted: what each row is comes from the rules (a type and category, or a
+  // transfer); a bank transfer on Flex is a savings transfer; anything else
+  // with no rule is left red as Other / Other income.
+  const typed=(desc, dir, amount, d, bankType)=>{
+    const row={date:iso(d), amount, name:desc, card, flagged:false, confirmed:false};
+    const k=Model.importKind(DATA, row, dir, bankType);
+    row.flagged=k.flagged;
+    return Model.setKind(row, dir, k.kind);
+  };
+  // Restarted, Flex: your own transfers (savings) come in too.
+  const keepTransfers = !!startIso && card==="Debit";
   rows.forEach(r=>{
+    if(startIso && iso(r.date)<startIso){beforeStart++;return;}
     if(cutoff && r.date<=cutoff){beforeCut++;return;}
-    if(SKIP_RE.test(r.desc)||SKIP_TYPE_RE.test(r.type)){skipped++;return;}
+    const own = keepTransfers && (Model.SAVER_RE.test(r.desc)||Model.SAVER_RE.test(r.type));
+    if(!own && (SKIP_RE.test(r.desc)||SKIP_TYPE_RE.test(r.type))){skipped++;return;}
     if(r.out>0){ if(takeMatch(txKeys,r.date,r.out)){dupes++;return;}
+      if(startIso){ newTx.push(typed(r.desc,"out",r.out,r.date,r.type)); return; }
       const cat=categorise(r.desc);
       newTx.push({date:iso(r.date),amount:r.out,name:r.desc,category:cat||"Other",card,flagged:!cat,confirmed:false}); }
     else if(r.in>0){ if(takeMatch(incKeys,r.date,r.in)){dupes++;return;}
+      if(startIso){ newInc.push(typed(r.desc,"in",r.in,r.date,r.type)); return; }
       const src=categorise(r.desc);
       newInc.push({date:iso(r.date),amount:r.in,name:r.desc,source:src||"Other",card,flagged:!src,confirmed:false}); }
   });
-  importPreview={newTx,newInc,dupes,skipped,beforeCut,stated,total:rows.length};
+  importPreview={newTx,newInc,dupes,skipped,beforeCut,beforeStart,startIso,stated,total:rows.length};
   renderImportPreview();
 }
 function renderImportPreview(){
-  const {newTx,newInc,dupes,skipped,beforeCut,stated,total}=importPreview;
+  const {newTx,newInc,dupes,skipped,beforeCut,beforeStart,startIso,stated,total}=importPreview;
   const out=document.getElementById("impOut"); out.innerHTML="";
   const stats=el(`<div class="grid kpis" style="margin:14px 0">
-    ${kpiHTML("Statement rows",total)}${kpiHTML("New spend",newTx.length)}${kpiHTML("New income",newInc.length)}
-    ${kpiHTML("Already in",dupes)}${kpiHTML("Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}</div>`);
+    ${kpiHTML("Statement rows",total)}${kpiHTML(startIso?"New money out":"New spend",newTx.length)}${kpiHTML(startIso?"New money in":"New income",newInc.length)}
+    ${kpiHTML("Already in",dupes)}${kpiHTML(startIso?"Skipped":"Transfers skipped",skipped)}${kpiHTML("Before cut-off",beforeCut)}
+    ${startIso?kpiHTML("Before "+Periods.fmt(startIso),beforeStart):""}</div>`);
   out.appendChild(stats);
+  if(startIso && beforeStart) out.appendChild(el(`<div class="muted" style="font-size:12px;margin:-4px 0 12px">${beforeStart} row${beforeStart===1?"":"s"} dated before ${Periods.fmtY(startIso)} ignored — the budget restarted from that payday, so earlier rows stay in the archive.</div>`));
+  // restarted: one picker for what a row is; otherwise a category / source
+  const cats={spend:Model.spendCats(DATA), income:Model.incomeCats(DATA)};
+  const picker=(t, dir, tr)=>{
+    if(!startIso){
+      const s = dir==="out" ? catSelect(t.category) : sourceSelect(t.source);
+      s.onchange=()=>{ if(dir==="out") t.category=s.value; else t.source=s.value; t.flagged=false; };
+      return s;
+    }
+    const s=kindSelect(dir, Model.classify(t, dir, DATA.categories), Model.accountOf(t), cats);
+    s.onchange=()=>{ Model.setKind(t, dir, parseKind(s.value)); t.flagged=false; tr.style.background=""; };
+    return s;
+  };
+  const head=dir=>startIso ? "Type / category" : dir==="out" ? "Category" : "Source";
   const unknown=[...newTx,...newInc].filter(t=>t.flagged).length;
   const c=el(`<div class="card pad"></div>`);
   c.appendChild(el(`<div class="flex wrap" style="justify-content:space-between;margin-bottom:2px;gap:8px">
@@ -1373,25 +2128,25 @@ function renderImportPreview(){
      <span class="flex" style="gap:6px">${unknown?`<span class="chip" style="color:var(--bad)">${unknown} need a category</span>`:`<span class="chip" style="color:var(--good)">all matched ✓</span>`}</span></div>`));
   c.appendChild(el(`<div class="muted" style="font-size:12px;margin-bottom:10px">Every row is matched against your rules automatically. Red rows had no rule — pick a category here and they're done. Anything you sort out on this screen goes straight into the Ledger confirmed; only rows still left red arrive as "to review".</div>`));
   if(newTx.length){
-    const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">Out</th><th>Category</th></tr></thead><tbody></tbody></table></div>`);
+    const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">Out</th><th>${head("out")}</th></tr></thead><tbody></tbody></table></div>`);
     const tb=w.querySelector("tbody");
     newTx.forEach(t=>{const tr=el(`<tr></tr>`);if(t.flagged)tr.style.background="var(--bad-bg)";
       tr.appendChild(el(`<td class="muted" style="white-space:nowrap">${fmtDate(t.date)}</td>`));
       tr.appendChild(el(`<td>${escHTML(t.name)}</td>`));
       tr.appendChild(el(`<td class="num">${money(t.amount)}</td>`));
-      const td=el(`<td></td>`);const s=catSelect(t.category);s.onchange=()=>{t.category=s.value;t.flagged=false;};td.appendChild(s);tr.appendChild(td);
+      const td=el(`<td></td>`);td.appendChild(picker(t,"out",tr));tr.appendChild(td);
       tb.appendChild(tr);});
     c.appendChild(w);
-  } else c.appendChild(el(`<div class="muted">No new spending to add.</div>`));
+  } else c.appendChild(el(`<div class="muted">${startIso?"No new money out to add.":"No new spending to add."}</div>`));
   if(newInc.length){
-    c.appendChild(el(`<h3 class="sec" style="margin-top:16px">New income (${newInc.length})</h3>`));
-    const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">In</th><th>Source</th></tr></thead><tbody></tbody></table></div>`);
+    c.appendChild(el(`<h3 class="sec" style="margin-top:16px">${startIso?"New money in":"New income"} (${newInc.length})</h3>`));
+    const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th class="num">In</th><th>${head("in")}</th></tr></thead><tbody></tbody></table></div>`);
     const tb=w.querySelector("tbody");
     newInc.forEach(t=>{const tr=el(`<tr></tr>`); if(t.flagged)tr.style.background="var(--bad-bg)";
       tr.appendChild(el(`<td class="muted" style="white-space:nowrap">${fmtDate(t.date)}</td>`));
       tr.appendChild(el(`<td>${escHTML(t.name)}</td>`));
       tr.appendChild(el(`<td class="num" style="color:var(--good)">${money(t.amount)}</td>`));
-      const td=el(`<td></td>`);const s=sourceSelect(t.source);s.onchange=()=>{t.source=s.value;t.flagged=false;};td.appendChild(s);tr.appendChild(td);
+      const td=el(`<td></td>`);td.appendChild(picker(t,"in",tr));tr.appendChild(td);
       tb.appendChild(tr);});
     c.appendChild(w);
   }
@@ -1425,36 +2180,87 @@ function kpiHTML(l,v){return `<div class="card kpi"><div class="lab">${l}</div><
 /* ---------- RULES ---------- */
 function categorise(text){ const d=(text||"").toLowerCase(); for(const r of DATA.rules){ if(d.includes(r.match)) return r.category; } return null; }
 function ruleFor(text){ const d=(text||"").toLowerCase(); return DATA.rules.find(r=>d.includes(r.match)); }
+/* Restarted: a rule makes matching rows a spending or income category, or a
+   transfer to / from one of your accounts. Value "cat|X" or "transfer|Account". */
+function rulePicker(rule){
+  const s=el(`<select class="sel-cat"></select>`);
+  const group=(label, items)=>{
+    const g=document.createElement("optgroup"); g.label=label;
+    items.forEach(([v,t])=>{ const o=document.createElement("option"); o.value=v; o.textContent=t; g.appendChild(o); });
+    s.appendChild(g);
+  };
+  group("Spending", Model.spendCats(DATA).map(c=>["cat|"+c, c]));
+  group("Income", Model.incomeCats(DATA).map(c=>["cat|"+c, c]));
+  group("Transfer — your own money", Model.TRANSFER_ACCOUNTS.map(a=>["transfer|"+a, "Transfer: "+(ACCOUNT_WORD[a]||a)]));
+  const cur = rule.transfer ? "transfer|"+rule.transfer : "cat|"+(rule.category||"Other");
+  if(![...s.options].some(o=>o.value===cur)){
+    const o=document.createElement("option"); o.value=cur; o.textContent=rule.transfer||rule.category||"Other"; s.insertBefore(o, s.firstChild);
+  }
+  s.value=cur;
+  return s;
+}
+function applyRulePick(rule, v){
+  const i=v.indexOf("|"), what=v.slice(0,i), val=v.slice(i+1);
+  if(what==="transfer"){ rule.transfer=val; delete rule.category; }
+  else { rule.category=val; delete rule.transfer; }
+  return rule;
+}
+// What the rules make of a row, or null (no rule, or a transfer to its own account).
+function ruleKind(t, dir){
+  const k=Model.fromRule(Model.ruleFor(DATA.rules, t.name, dir), dir, DATA);
+  return k && !(k.type==="Transfer" && k.other===Model.accountOf(t)) ? k : null;
+}
 function renderRules(m){
+  const typed=Model.isRestarted(DATA);
   m.innerHTML="";
-  m.appendChild(el(`<div class="head"><h1>Rules</h1><span class="sub">${DATA.rules.length} rules · a merchant name containing the text gets the category</span></div>`));
+  m.appendChild(el(`<div class="head"><h1>Rules</h1><span class="sub">${DATA.rules.length} rules · ${typed?"a description containing the text gets the category or transfer; income rules (e.g. Salary) only apply to money in":"a merchant name containing the text gets the category"}</span></div>`));
   // add form
   const add=el(`<div class="card pad flex wrap" style="gap:10px;margin-bottom:14px">
      <input type="text" id="rMatch" placeholder="merchant contains… e.g. tesco" style="flex:1;min-width:160px">
      <select id="rCat"></select><button class="btn pri" id="rAdd">Add rule</button></div>`);
-  const rc=add.querySelector("#rCat"); DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;rc.appendChild(o);});
+  let rc=add.querySelector("#rCat");
+  if(typed){ const p=rulePicker({category:"Other"}); p.id="rCat"; rc.replaceWith(p); rc=p; }
+  else DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;rc.appendChild(o);});
   add.querySelector("#rAdd").onclick=()=>{const v=add.querySelector("#rMatch").value.trim().toLowerCase();if(!v)return;
-    DATA.rules.push({match:v,category:rc.value});DATA.rules=dedupeRules(DATA.rules);markDirty();renderRules(m);};
+    DATA.rules.push(typed ? applyRulePick({match:v}, rc.value) : {match:v,category:rc.value});DATA.rules=dedupeRules(DATA.rules);markDirty();renderRules(m);};
   m.appendChild(add);
-  // counts
-  const counts={}; DATA.rules.forEach(r=>counts[r.match]=0);
-  DATA.transactions.forEach(t=>{const r=ruleFor(t.name);if(r)counts[r.match]=(counts[r.match]||0)+1;});
+  // counts (restarted: by direction, so "sainsbury" for Salary and for Groceries count apart)
+  const counts=new Map();
+  const count=dir=>t=>{const r=typed?Model.ruleFor(DATA.rules,t.name,dir):ruleFor(t.name);if(r)counts.set(r,(counts.get(r)||0)+1);};
+  DATA.transactions.forEach(count("out")); if(typed) (DATA.income||[]).forEach(count("in"));
   const c=el(`<div class="card"></div>`);
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Merchant contains</th><th>Category</th><th class="num">Matches</th><th></th></tr></thead><tbody></tbody></table></div>`);
+  const w=el(`<div class="tablewrap"><table><thead><tr><th>Merchant contains</th><th>${typed?"Category / transfer":"Category"}</th><th class="num">Matches</th><th></th></tr></thead><tbody></tbody></table></div>`);
   const tb=w.querySelector("tbody");
   DATA.rules.forEach((r,i)=>{
     const tr=el(`<tr></tr>`);
     tr.appendChild(el(`<td><code>${escHTML(r.match)}</code></td>`));
-    const td=el(`<td></td>`);const s=el(`<select class="sel-cat"></select>`);DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;o.selected=c===r.category;s.appendChild(o);});
-    s.onchange=()=>{r.category=s.value;markDirty();};td.appendChild(s);tr.appendChild(td);
-    tr.appendChild(el(`<td class="num muted">${counts[r.match]||0}</td>`));
+    const td=el(`<td></td>`);
+    if(typed){ const s=rulePicker(r); s.onchange=()=>{applyRulePick(r,s.value);markDirty();}; td.appendChild(s); tr.appendChild(td); }
+    else if(r.transfer){ td.appendChild(el(`<span class="chip">Transfer · ${escHTML(kindText("out",{type:"Transfer",other:r.transfer}))}</span>`)); tr.appendChild(td); }
+    else { const s=el(`<select class="sel-cat"></select>`);DATA.categories.forEach(c=>{const o=document.createElement("option");o.textContent=c;o.selected=c===r.category;s.appendChild(o);});
+      s.onchange=()=>{r.category=s.value;markDirty();};td.appendChild(s);tr.appendChild(td); }
+    tr.appendChild(el(`<td class="num muted">${counts.get(r)||0}</td>`));
     const td2=el(`<td class="right"></td>`);const del=el(`<button class="btn sm danger">✕</button>`);del.onclick=()=>{DATA.rules.splice(i,1);markDirty();renderRules(m);};td2.appendChild(del);tr.appendChild(td2);
     tb.appendChild(tr);
   });
   c.appendChild(w); m.appendChild(c);
   // re-apply
-  const re=el(`<button class="btn" style="margin-top:14px">Re-apply rules to un-reviewed transactions</button>`);
-  re.onclick=()=>{let n=0;DATA.transactions.forEach(t=>{if(t.flagged||t.category==="Other"){const c=categorise(t.name);if(c&&c!==t.category){t.category=c;t.flagged=false;n++;}}});markDirty();alert(`Re-categorised ${n} transactions.`);renderRules(m);};
+  const re=el(`<button class="btn" style="margin-top:14px">${typed?"Re-apply rules to un-reviewed rows":"Re-apply rules to un-reviewed transactions"}</button>`);
+  if(typed) re.onclick=()=>{
+    // only rows still flagged or on Other / Other income; split rows are left alone
+    let n=0;
+    const go=(list, dir)=>(list||[]).forEach(t=>{
+      if(t.categorySplits||t.sourceSplits) return;
+      const k=Model.classify(t, dir, DATA.categories);
+      if(!(t.flagged || (k.type==="Spend"&&k.category==="Other") || (k.type==="Income"&&k.category==="Other income"))) return;
+      const r=ruleKind(t, dir); if(!r) return;
+      if(kindValue(r)!==kindValue(k)){ Model.setKind(t, dir, r); n++; }
+      t.flagged=false;
+    });
+    go(DATA.transactions,"out"); go(DATA.income,"in");
+    markDirty(); toast(`Rules re-applied: ${n} row${n===1?"":"s"} changed.`); renderRules(m);
+  };
+  else re.onclick=()=>{let n=0;DATA.transactions.forEach(t=>{if(t.flagged||t.category==="Other"){const c=categorise(t.name);if(c&&c!==t.category){t.category=c;t.flagged=false;n++;}}});markDirty();alert(`Re-categorised ${n} transactions.`);renderRules(m);};
   m.appendChild(re);
 }
 
@@ -1463,15 +2269,13 @@ function renderAccounts(m){
   recordWealthSnapshot();
   m.innerHTML="";
   m.appendChild(el(`<div class="head"><h1>Accounts</h1><span class="sub">balances & the weekly reconcile check</span></div>`));
-  const a=DATA.accounts, cats=DATA.categories;
+  const a=DATA.accounts;
   // Amounts derived from the ledger (kept in sync automatically):
-  const debitSpend   =DATA.transactions.filter(t=>(t.card||"Debit")==="Debit" && cats.includes(t.category)).reduce((s,t)=>s+t.amount,0);
-  const creditPaid   =DATA.transactions.filter(t=>(t.card||"Debit")==="Debit" && !cats.includes(t.category)).reduce((s,t)=>s+t.amount,0); // "Credit"-tagged debit rows = card repayments
-  const creditCharges=DATA.transactions.filter(t=>(t.card||"Debit")==="Credit").reduce((s,t)=>s+t.amount,0);
-  const flexIncome   =DATA.income.filter(t=>(t.card||"Debit")!=="Credit").reduce((s,t)=>s+t.amount,0);
-  const creditRefunds=DATA.income.filter(t=>(t.card||"Debit")==="Credit").reduce((s,t)=>s+t.amount,0);
-  const flex   = a.openingFlex   - debitSpend + flexIncome - creditPaid;
-  const credit = a.openingCredit - creditCharges + creditPaid + creditRefunds;
+  const b=accountBuckets(), bal=Model.balances(DATA);
+  const flex=bal.flex, credit=bal.card;
+  const openLabel = Model.isRestarted(DATA)
+    ? "Opening balance (close "+Periods.fmt(Periods.addDays(DATA.meta.startDate,-1))+")"
+    : "Opening balance (1 Jan)";
 
   // ---- total wealth: everything you own minus what you owe ----
   a.savings = a.savings||[]; a.cash = a.cash||{n50:0,n20:0,n10:0,n5:0,coins:0};
@@ -1488,20 +2292,24 @@ function renderAccounts(m){
 
   // ---- FlexGraduate (current account) ----
   const c=el(`<div class="card pad" style="max-width:560px"><h3 class="sec">FlexGraduate — current account (Debit)</h3></div>`);
-  c.appendChild(kvEdit("Opening balance (1 Jan)",a,"openingFlex"));
-  c.appendChild(lineRO("− Debit spending",debitSpend));
-  c.appendChild(lineRO("+ Income",flexIncome));
-  c.appendChild(lineRO("− Credit-card repayments",creditPaid));
+  c.appendChild(kvEdit(openLabel,a,"openingFlex"));
+  c.appendChild(lineRO("− Spending",b.flex.spend));
+  c.appendChild(lineRO("+ Money in",b.flex.moneyIn));
+  c.appendChild(lineRO("− Credit-card repayments",b.flex.card));
+  if(b.flex.toSavings) c.appendChild(lineRO("− To savings",b.flex.toSavings));
+  if(b.flex.fromSavings) c.appendChild(lineRO("+ From savings",b.flex.fromSavings));
+  if(b.flex.other) c.appendChild(lineRO("± Other transfers",b.flex.other));
   c.appendChild(totalLine("Computed balance",flex));
   c.appendChild(reconcileRow(flex,"-2294.96"));
   m.appendChild(c);
 
   // ---- Member Credit Card ----
   const cc=el(`<div class="card pad" style="max-width:560px;margin-top:14px"><h3 class="sec">Member Credit Card</h3></div>`);
-  cc.appendChild(kvEdit("Opening balance (1 Jan)",a,"openingCredit"));
-  cc.appendChild(lineRO("− Card charges",creditCharges));
-  cc.appendChild(lineRO("+ Repayments made",creditPaid));
-  if(creditRefunds) cc.appendChild(lineRO("+ Refunds to card",creditRefunds));
+  cc.appendChild(kvEdit(openLabel,a,"openingCredit"));
+  cc.appendChild(lineRO("− Card charges",b.card.charges));
+  cc.appendChild(lineRO("+ Repayments made",b.card.repaid));
+  if(b.card.refunds) cc.appendChild(lineRO("+ Refunds to card",b.card.refunds));
+  if(b.card.other) cc.appendChild(lineRO("± Other transfers",b.card.other));
   cc.appendChild(totalLine("Computed balance",credit));
   cc.appendChild(reconcileRow(credit,"-1154.95"));
   m.appendChild(cc);
@@ -1550,6 +2358,32 @@ function renderAccounts(m){
   m.appendChild(s);
 
 }
+// What moved each account, from the ledger. Flex: {spend, moneyIn, card,
+// toSavings, fromSavings, other}; card: {charges, repaid, refunds, other}.
+// `card` / `repaid` are the net paid to the card; `other` is a signed net.
+// The lines add up to Model.balances.
+function accountBuckets(){
+  const f={spend:0,moneyIn:0,card:0,toSavings:0,fromSavings:0,other:0}, c={charges:0,repaid:0,refunds:0,other:0};
+  Model.ledger(DATA).forEach(r=>{
+    const k=Model.classify(r.row, r.dir, DATA.categories), own=Model.accountOf(r.row), amt=+r.row.amount||0;
+    const xfer = k.type==="Transfer" && k.other!==own;
+    if(r.flex){
+      if(own==="Flex" && r.dir==="out" && k.type==="Spend") f.spend+=amt;
+      else if(own==="Flex" && r.dir==="in" && (k.type==="Income"||k.type==="Refund")) f.moneyIn+=amt;
+      else if(own==="Flex" && xfer && k.other==="Savings"){ if(r.dir==="out") f.toSavings+=amt; else f.fromSavings+=amt; }
+      else if(xfer && (k.other==="Card"||own==="Card")) f.card-=r.flex;
+      else f.other+=r.flex;
+    }
+    if(r.card){
+      if(own==="Card" && r.dir==="out" && k.type==="Spend") c.charges+=amt;
+      else if(own==="Card" && r.dir==="in" && (k.type==="Income"||k.type==="Refund")) c.refunds+=amt;
+      else if(xfer && (k.other==="Flex"||own==="Flex")) c.repaid+=r.card;
+      else c.other+=r.card;
+    }
+  });
+  [f,c].forEach(o=>Object.keys(o).forEach(x=>{ o[x]=Model.round2(o[x]); }));
+  return {flex:f, card:c};
+}
 function kvEdit(label,obj,key){
   const d=el(`<div class="flex" style="justify-content:space-between;padding:6px 0"><span class="muted">${label}</span></div>`);
   const inp=el(`<input type="number" step="0.01" style="width:150px;text-align:right">`);inp.value=obj[key]??0;inp.onchange=()=>{obj[key]=parseFloat(inp.value)||0;markDirty();renderAccounts(document.getElementById("main"));};
@@ -1571,6 +2405,7 @@ function renderData(m){
   m.innerHTML="";
   m.appendChild(el(`<div class="head"><h1>Data</h1><span class="sub">where your budget is stored</span></div>`));
   m.appendChild(cloudCard());
+  m.appendChild(payPeriodsCard());
 
   const c=el(`<div class="card pad" style="max-width:640px;margin-top:14px"><h3 class="sec">Backups &amp; transfer</h3></div>`);
   const btns=el(`<div class="flex wrap" style="gap:10px"></div>`);
@@ -1734,6 +2569,7 @@ function fmtDate(iso){const d=parseD(iso);return d.getDate()+" "+MONTHS[d.getMon
 function escHTML(s){return String(s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));}
 function escAttr(s){return String(s).replace(/"/g,"&quot;");}
 function txModal(){
+  if(Model.isRestarted(DATA)) return newRowSheet("out");
   const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Add transaction</h3></div></div>`);
   const md=bg.querySelector(".modal");
   md.appendChild(el(`<div class="field"><label>Date</label><input type="date" id="mDate" value="${todayISO()}"></div>`));
@@ -1766,6 +2602,7 @@ function sourceSelect(cur){
   return s;
 }
 function incModal(){
+  if(Model.isRestarted(DATA)) return newRowSheet("in");
   const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Add income</h3></div></div>`);
   const md=bg.querySelector(".modal");
   md.appendChild(el(`<div class="field"><label>Date</label><input type="date" id="mDate" value="${todayISO()}"></div>`));
@@ -1787,33 +2624,13 @@ function incModal(){
 
 /* ---------- LEDGER — the single register: all money in + out, editable ---------- */
 function ledgerAll(){
-  // one row per transaction/income, carrying a ref to the real object so edits persist.
-  // Each row is classified by how it moves each account (Flex current a/c and the card):
-  //  - debit spend  -> Flex out
-  //  - card charge  -> Credit out (increases debt)
-  //  - card repayment (a debit tx tagged "Credit") -> Flex out AND Credit in (pays it down)
-  //  - income       -> Flex in (or Credit in if it's a refund tagged to the card)
-  const rows=[];
-  DATA.transactions.forEach(t=>rows.push({date:t.date,ref:t,kind:"tx",card:(t.card||"Debit")}));
-  DATA.income.forEach(t=>rows.push({date:t.date,ref:t,kind:"inc",card:(t.card||"Debit")}));
-  rows.sort((a,b)=>a.date.localeCompare(b.date)||(a.kind==="inc"?-1:1));   // income before spend same day
-  rows.forEach(r=>{
-    const t=r.ref, amt=t.amount;
-    r.flexEffect=0; r.creditEffect=0; r.affectsFlex=false; r.affectsCredit=false;
-    if(r.kind==="tx"){
-      if(r.card==="Debit"){
-        r.affectsFlex=true; r.flexEffect=-amt;
-        if(!DATA.categories.includes(t.category)){ r.affectsCredit=true; r.creditEffect=+amt; } // "Credit" = card repayment
-      } else { r.affectsCredit=true; r.creditEffect=-amt; }                                      // a card charge
-    } else {
-      if(r.card==="Credit"){ r.affectsCredit=true; r.creditEffect=+amt; }                        // refund to the card
-      else { r.affectsFlex=true; r.flexEffect=+amt; }
-    }
-  });
-  let fbal=(DATA.accounts&&DATA.accounts.openingFlex)||0;
-  let cbal=(DATA.accounts&&DATA.accounts.openingCredit)||0;
-  rows.forEach(r=>{ if(r.affectsFlex){ fbal+=r.flexEffect; r.flexBal=fbal; } if(r.affectsCredit){ cbal+=r.creditEffect; r.creditBal=cbal; } });
-  return rows;
+  // one row per transaction/income, carrying a ref to the real object so edits persist,
+  // with how it moves the Flex current account and the card, and the running balances
+  // (Model.ledger: a card repayment is Flex out AND card in; a transfer to savings is
+  // Flex out only; money in before money out on the same day).
+  return Model.ledger(DATA).map(r=>({date:r.row.date, ref:r.row, kind:r.dir==="out"?"tx":"inc", card:r.row.card||"Debit",
+    flexEffect:r.flex, creditEffect:r.card, affectsFlex:r.affectsFlex, affectsCredit:r.affectsCard,
+    flexBal:r.flexBal, creditBal:r.cardBal}));
 }
 // what a row shows in the current account view: {out,in,bal}
 function ledgerAmounts(r){
@@ -1823,37 +2640,74 @@ function ledgerAmounts(r){
   return {out:r.kind==="tx"?r.ref.amount:0, in:r.kind==="inc"?r.ref.amount:0, bal:null};       // All: intrinsic, no balance
 }
 function ledgerFiltered(){
-  let rows=ledgerAll().filter(r=>txInPeriod(r.ref));
+  const inP=periodTest();
+  let rows=ledgerAll().filter(r=>inP(r.ref));
   if(ledgerFilter.account==="Flex") rows=rows.filter(r=>r.affectsFlex);
   else if(ledgerFilter.account==="Credit") rows=rows.filter(r=>r.affectsCredit);
-  if(ledgerFilter.cat!=="All"){
+  if(Model.isRestarted(DATA)){
+    const ft=ledgerFilter.type, fc=ledgerFilter.cat;
+    if(ft!=="All" || fc!=="All") rows=rows.filter(r=>{
+      const k=Model.classify(r.ref, r.kind==="tx"?"out":"in", DATA.categories);
+      if(ft!=="All" && k.type!==ft) return false;
+      if(fc==="All") return true;
+      if(k.type==="Income") return k.category===fc;
+      if(k.type==="Spend" || k.type==="Refund") return rowCats(r.ref, k).has(fc);
+      return false;
+    });
+  } else if(ledgerFilter.cat!=="All"){
     rows=rows.filter(r=>{
-      if(ledgerFilter.cat==="Credit") return r.kind==="tx" && !DATA.categories.includes(r.ref.category);
-      if(r.kind==="tx") return catAllocations(r.ref).some(a=>a.category===ledgerFilter.cat);
-      return srcAllocations(r.ref).some(a=>a.source===ledgerFilter.cat);   // income matched by source
+      if(ledgerFilter.cat==="Credit"){   // card repayments
+        const k=Model.classify(r.ref, r.kind==="tx"?"out":"in", DATA.categories);
+        return k.type==="Transfer" && k.other==="Card";
+      }
+      if(r.kind==="tx" || r.ref.type) return catAllocations(r.ref).some(a=>a.category===ledgerFilter.cat);
+      return srcAllocations(r.ref).some(a=>a.source===ledgerFilter.cat);   // older income rows: matched by source
     });
   }
   if(ledgerFilter.status==="Needs review") rows=rows.filter(r=>!r.ref.confirmed);
   else if(ledgerFilter.status==="Confirmed") rows=rows.filter(r=>r.ref.confirmed);
-  if(ledgerFilter.q){const s=ledgerFilter.q.toLowerCase(); rows=rows.filter(r=>((r.ref.name||"")+" "+(r.ref.category||r.ref.source||"")).toLowerCase().includes(s));}
+  if(ledgerFilter.q){const s=ledgerFilter.q.toLowerCase(); rows=rows.filter(r=>((r.ref.name||"")+" "+(r.ref.category||r.ref.source||r.ref.to||r.ref.from||"")).toLowerCase().includes(s));}
   return rows;
+}
+// The categories a spend or refund row counts in: its split, plus its own
+// category for any amount the split leaves out.
+function rowCats(t, k){
+  const splits=(t.categorySplits||[]).filter(s=>s.category), out=new Set(splits.map(s=>s.category));
+  if(!splits.length || Math.abs(catUnassignedAmt(t))>0.005) out.add(k.category||"Other");
+  return out;
 }
 function renderLedger(m){
   m.innerHTML="";
   const head=el(`<div class="head"><h1>Ledger</h1><div class="spacer"></div></div>`);
   const unlockBtn=el(`<button class="btn">Unlock all</button>`);
   unlockBtn.onclick=()=>{ if(confirm("Send ALL transactions back to 'to review'?\n\nYour categories aren't changed — this just unlocks them so you can check each one.")){ DATA.transactions.forEach(t=>t.confirmed=false); markDirty(); ledgerFilter.status="Needs review"; render(); } };
-  const addS=el(`<button class="btn">+ Spending</button>`); addS.onclick=()=>txModal();
-  const addI=el(`<button class="btn pri">+ Income</button>`); addI.onclick=()=>incModal();
+  const restarted=Model.isRestarted(DATA);
+  const addS=el(`<button class="btn"></button>`); addS.textContent=restarted?"+ Money out":"+ Spending"; addS.onclick=()=>txModal();
+  const addI=el(`<button class="btn pri"></button>`); addI.textContent=restarted?"+ Money in":"+ Income"; addI.onclick=()=>incModal();
   head.appendChild(unlockBtn); head.appendChild(addS); head.appendChild(addI); m.appendChild(head);
 
   const bar=el(`<div class="card pad flex wrap" style="margin-bottom:14px;gap:10px"></div>`);
   bar.appendChild(periodControls(render));
   const accSel=el(`<select><option value="All">All accounts</option><option value="Flex">Flex (current a/c)</option><option value="Credit">Credit card</option></select>`);
   accSel.value=ledgerFilter.account; accSel.onchange=()=>{ledgerFilter.account=accSel.value;render()}; bar.appendChild(accSel);
-  const typeSel=el(`<select></select>`);
-  ["All",...DATA.categories,"Credit"].forEach(c=>{const o=document.createElement("option");o.value=c;o.textContent=c==="All"?"All categories":c;o.selected=c===ledgerFilter.cat;typeSel.appendChild(o);});
-  typeSel.onchange=()=>{ledgerFilter.cat=typeSel.value;render()}; bar.appendChild(typeSel);
+  const opt=(parent,v,lab)=>{const o=document.createElement("option");o.value=v;o.textContent=lab;parent.appendChild(o);};
+  if(Model.isRestarted(DATA)){
+    const kSel=el(`<select title="type"></select>`);
+    [["All","All types"],["Spend","Spending"],["Refund","Refunds"],["Income","Income"],["Transfer","Transfers"]].forEach(([v,lab])=>opt(kSel,v,lab));
+    if(![...kSel.options].some(o=>o.value===ledgerFilter.type)) ledgerFilter.type="All";
+    kSel.value=ledgerFilter.type; kSel.onchange=()=>{ledgerFilter.type=kSel.value;render()}; bar.appendChild(kSel);
+    const cSel=el(`<select title="category"></select>`);
+    opt(cSel,"All","All categories");
+    [["Spending",Model.spendCats(DATA)],["Income",Model.incomeCats(DATA)]].forEach(([lab,list])=>{
+      const g=document.createElement("optgroup"); g.label=lab; list.forEach(c=>opt(g,c,c)); cSel.appendChild(g);
+    });
+    if(![...cSel.options].some(o=>o.value===ledgerFilter.cat)) ledgerFilter.cat="All";
+    cSel.value=ledgerFilter.cat; cSel.onchange=()=>{ledgerFilter.cat=cSel.value;render()}; bar.appendChild(cSel);
+  } else {
+    const typeSel=el(`<select></select>`);
+    ["All",...DATA.categories,"Credit"].forEach(c=>{const o=document.createElement("option");o.value=c;o.textContent=c==="All"?"All categories":c;o.selected=c===ledgerFilter.cat;typeSel.appendChild(o);});
+    typeSel.onchange=()=>{ledgerFilter.cat=typeSel.value;render()}; bar.appendChild(typeSel);
+  }
   const statusSel=el(`<select title="review status"><option>All</option><option>Needs review</option><option>Confirmed</option></select>`);
   statusSel.value=ledgerFilter.status; statusSel.onchange=()=>{ledgerFilter.status=statusSel.value;render()}; bar.appendChild(statusSel);
   const sortBtn=el(`<button class="btn sm">${ledgerFilter.sort==="new"?"Newest first ▾":"Oldest first ▴"}</button>`);
@@ -1886,7 +2740,7 @@ function renderLedgerTable(){
   const balLabel = ledgerFilter.account==="Credit" ? "Card balance" : "Flex balance";
   holder.innerHTML="";
   holder.appendChild(el(`<div class="pad flex wrap" style="border-bottom:1px solid var(--line-2);gap:16px"><span class="muted">${rows.length} entries</span><span class="muted">Out <b style="color:var(--bad)">${money(totOut)}</b></span><span class="muted">In <b style="color:var(--good)">${money(totIn)}</b></span><span class="muted">Net <b>${money(totIn-totOut)}</b></span>${unc?`<span class="muted">· <b style="color:var(--warn)">${unc} to review</b></span>`:''}</div>`));
-  const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th>Category / source</th><th>Account</th><th class="num">Out</th><th class="num">In</th>${showBal?`<th class="num">${balLabel}</th>`:''}<th></th></tr></thead><tbody></tbody></table></div>`);
+  const w=el(`<div class="tablewrap"><table><thead><tr><th>Date</th><th>Description</th><th>${Model.isRestarted(DATA)?"Type / category":"Category / source"}</th><th>Account</th><th class="num">Out</th><th class="num">In</th>${showBal?`<th class="num">${balLabel}</th>`:''}<th></th></tr></thead><tbody></tbody></table></div>`);
   const tb=w.querySelector("tbody");
   disp.slice(0,800).forEach(r=>tb.appendChild(ledgerRow(r,showBal)));
   if(disp.length>800) tb.appendChild(el(`<tr><td colspan="${cols}" class="muted" style="text-align:center">Showing first 800 of ${disp.length}. Narrow with the filters.</td></tr>`));
@@ -1900,9 +2754,12 @@ function renderLedgerTable(){
   holder.appendChild(el(`<div class="pad muted" style="font-size:12px;border-top:1px solid var(--line-2)">${note}</div>`));
 }
 function ledgerRow(r,showBal){
-  const t=r.ref, isTx=r.kind==="tx"; const a=ledgerAmounts(r);
+  const t=r.ref, isTx=r.kind==="tx"; const a=ledgerAmounts(r), restarted=Model.isRestarted(DATA);
   const tr=el(`<tr></tr>`); if(!t.confirmed) tr.className = t.flagged ? "needs-unknown" : "needs";
-  tr.appendChild(el(`<td class="muted" style="white-space:nowrap">${fmtDate(t.date)}</td>`));
+  const dc=el(`<td class="muted" style="white-space:nowrap"></td>`); dc.textContent=fmtDate(t.date);
+  const ci=restarted && t.countIn && Periods.periodByKey(Model.cycleOf(DATA), t.countIn);
+  if(ci && Model.rowPeriodKey(DATA, {date:t.date})!==ci.key){ dc.textContent+=" ✏️"; dc.title="Counts in pay period "+Periods.label(ci); }
+  tr.appendChild(dc);
   // description (editable)
   const td2=el(`<td></td>`); const nameIn=el(`<input class="inline-in" value="${escAttr(t.name||"")}">`);
   nameIn.onchange=()=>{t.name=nameIn.value;markDirty();}; td2.appendChild(nameIn); tr.appendChild(td2);
@@ -1917,8 +2774,9 @@ function ledgerRow(r,showBal){
   const td6=el(`<td class="right" style="white-space:nowrap"></td>`);
   if(t.confirmed){ const un=el(`<button class="btn sm" title="unlock to change">✎</button>`); un.onclick=()=>{t.confirmed=false;markDirty();render();}; td6.appendChild(un); }
   else { const ok=el(`<button class="btn sm ok" title="lock this in">Confirm</button>`); ok.onclick=()=>{t.confirmed=true;t.flagged=false;markDirty();render();}; td6.appendChild(ok); }
-  const mv=el(`<button class="btn sm" title="reassign to a different month">📅</button>`);
-  mv.onclick=()=>moveMonthModal(t);
+  const mv=el(`<button class="btn sm"></button>`);
+  mv.textContent="📅"; mv.title=restarted?"count it in a different pay period":"reassign to a different month";
+  mv.onclick=()=>restarted?countInSheet(t):moveMonthModal(t);
   td6.appendChild(mv);
   const del=el(`<button class="btn sm danger" style="margin-left:6px">✕</button>`);
   del.onclick=()=>{ if(confirm("Delete this entry?")){ if(isTx) DATA.transactions=DATA.transactions.filter(x=>x!==t); else DATA.income=DATA.income.filter(x=>x!==t); markDirty(); render(); } };
@@ -1928,6 +2786,7 @@ function ledgerRow(r,showBal){
 // the category/source cell: a plain dropdown + split button, or (once split) a summary
 // of the split with an edit link. Shared by the Ledger's spend and income rows.
 function ledgerAssignCell(t, isTx){
+  if(Model.isRestarted(DATA)) return ledgerKindCell(t, isTx);
   const td=el(`<td></td>`);
   const wrap=el(`<span class="flex" style="gap:6px;flex-wrap:wrap"></span>`);
   const hasSplit = isTx ? (t.categorySplits && t.categorySplits.length) : (t.sourceSplits && t.sourceSplits.length);
@@ -1950,6 +2809,82 @@ function ledgerAssignCell(t, isTx){
   if(t.confirmed) td.appendChild(el(`<span class="lockic" title="confirmed & locked">🔒</span>`));
   else td.appendChild(el(`<span class="review-tag">review</span>`));
   return td;
+}
+// Restarted budgets: one picker for what the row is (type + category, or the
+// account at the other end of a transfer), and a category split for spending
+// and refunds. Any amount left out of a split counts in the row's category.
+function ledgerKindCell(t, isTx){
+  const dir=isTx?"out":"in", k=Model.classify(t, dir, DATA.categories);
+  const td=el(`<td></td>`);
+  const wrap=el(`<span class="flex" style="gap:6px;flex-wrap:wrap"></span>`);
+  const splittable = k.type==="Spend" || k.type==="Refund";
+  if(splittable && t.categorySplits && t.categorySplits.length){
+    const u=catUnassignedAmt(t);
+    const parts=t.categorySplits.filter(s=>s.category).map(a=>`${escHTML(a.category)} ${money(a.amount)}`).join(" · ");
+    wrap.appendChild(el(`<span><b>${k.type==="Refund"?"Refund split":"Split"}:</b> ${parts}${Math.abs(u)>0.005?` <span class="muted">· ${money(u)} ${escHTML(k.category||"Other")}</span>`:''}</span>`));
+    const edit=el(`<button class="btn sm">edit split</button>`); edit.onclick=()=>categorySplitModal(t); wrap.appendChild(edit);
+  } else {
+    const sel=kindSelect(dir, k, Model.accountOf(t), {spend:Model.spendCats(DATA), income:Model.incomeCats(DATA)});
+    sel.disabled=t.confirmed;
+    sel.onchange=()=>{
+      const nk=parseKind(sel.value);
+      Model.setKind(t, dir, nk); t.flagged=false;
+      if(nk.type==="Spend" && t.name && !ruleFor(t.name)) offerRule(t.name, nk.category);
+      markDirty(); renderLedgerTable();
+    };
+    wrap.appendChild(sel);
+    if(splittable){
+      const sp=el(`<button class="btn sm" title="split across categories">split</button>`);
+      sp.onclick=()=>categorySplitModal(t); wrap.appendChild(sp);
+    }
+  }
+  td.appendChild(wrap);
+  if(t.confirmed) td.appendChild(el(`<span class="lockic" title="confirmed & locked">🔒</span>`));
+  else td.appendChild(el(`<span class="review-tag">review</span>`));
+  return td;
+}
+
+/* What a row is, as one <select>: value "Type|category" or "Transfer|account".
+   Money out: spending categories, or a transfer to another of your accounts.
+   Money in: income, a refund against a spending category, or a transfer in.
+   `own` is the row's account; `cats` = {spend:[…], income:[…]}. */
+const kindValue = k => k.type+"|"+(k.type==="Transfer" ? (k.other||"") : (k.category||""));
+function parseKind(v){
+  const i=String(v).indexOf("|"), type=String(v).slice(0,i), rest=String(v).slice(i+1);
+  return type==="Transfer" ? {type, category:null, other:rest} : {type, category:rest, other:null};
+}
+const ACCOUNT_WORD = {Card:"credit card", Flex:"Flex", Savings:"savings"};
+function kindText(dir, k){
+  if(k.type==="Transfer"){
+    if(dir==="out" && k.other==="Card") return "Card repayment";
+    return (dir==="out"?"To ":"From ")+(ACCOUNT_WORD[k.other]||k.other||"?");
+  }
+  if(k.type==="Refund") return "Refund: "+(k.category||"?");
+  if(k.type==="Spend"||k.type==="Income") return k.category||"?";
+  return k.type+": "+(k.category||"?");
+}
+function kindSelect(dir, kind, own, cats){
+  const s=el(`<select class="sel-cat"></select>`);
+  const group=(label, kinds)=>{
+    const g=document.createElement("optgroup"); g.label=label;
+    kinds.forEach(k=>{ const o=document.createElement("option"); o.value=kindValue(k); o.textContent=kindText(dir,k); g.appendChild(o); });
+    s.appendChild(g);
+  };
+  const transfers=Model.TRANSFER_ACCOUNTS.filter(a=>a!==own).map(a=>({type:"Transfer",category:null,other:a}));
+  if(dir==="out"){
+    group("Spending", cats.spend.map(c=>({type:"Spend",category:c,other:null})));
+    group("Transfer — your own money", transfers);
+  } else {
+    group("Income", cats.income.map(c=>({type:"Income",category:c,other:null})));
+    group("Refund — takes money off spending", cats.spend.map(c=>({type:"Refund",category:c,other:null})));
+    group("Transfer — your own money", transfers);
+  }
+  const cur=kindValue(kind);
+  if(![...s.options].some(o=>o.value===cur)){
+    const o=document.createElement("option"); o.value=cur; o.textContent=kindText(dir,kind); s.insertBefore(o, s.firstChild);
+  }
+  s.value=cur;
+  return s;
 }
 function categorySplitModal(t){
   const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Split across categories</h3></div></div>`);
@@ -2028,6 +2963,63 @@ function sourceSplitModal(t){
   document.body.appendChild(bg);
 }
 function daysInMonth(y,m){ return new Date(y,m,0).getDate(); }   // m is 1-12
+// Count a row in a different pay period, e.g. a shop the day before payday
+// that's really for the new period. The bank date doesn't change.
+function countInSheet(t){
+  const cy=Model.cycleOf(DATA), own=Periods.periodFor(cy, t.date), first=Periods.periodFor(cy, Model.startOf(DATA));
+  const cur=Periods.periodByKey(cy, Model.rowPeriodKey(DATA, t)) || own;
+  const s=openSheet("Count in a different pay period");
+  const info=el(`<p style="font-size:13px;margin:0 0 10px"></p>`);
+  info.textContent=(t.name||"(no description)")+" · "+money(t.amount)+" · "+Periods.fmtY(t.date);
+  s.body.appendChild(info);
+  const sel=el(`<select></select>`), list=[];
+  for(let n=Math.max(first.index, own.index-3); n<=own.index+3; n++) list.push(Periods.periodAt(cy,n));
+  if(!list.some(p=>p.key===cur.key)){ list.push(cur); list.sort((a,b)=>a.index-b.index); }
+  list.forEach(p=>{ const o=document.createElement("option"); o.value=p.key; o.textContent=Periods.label(p)+(p.key===own.key?" (its own)":""); sel.appendChild(o); });
+  sel.value=cur.key;
+  const fl=el(`<div class="fields"></div>`); fl.appendChild(wizField("Counts in pay period", sel)); s.body.appendChild(fl);
+  s.body.appendChild(el(`<p class="hint">The bank date stays ${Periods.fmt(t.date)} in the Ledger and on the Week, Month and Year views; only the pay period it counts in changes.</p>`));
+  const row=el(`<div class="flex wrap" style="margin-top:12px"></div>`);
+  const ok=el(`<button class="btn pri">Save</button>`);
+  ok.onclick=()=>{ if(sel.value===own.key) delete t.countIn; else t.countIn=sel.value; markDirty(); s.close(); render(); };
+  row.appendChild(ok);
+  if(cur.key!==own.key){ const back=el(`<button class="btn">Back to its own period</button>`); back.onclick=()=>{ delete t.countIn; markDirty(); s.close(); render(); }; row.appendChild(back); }
+  s.body.appendChild(row);
+}
+// Add a row by hand once restarted: date, amount, what it is and the account.
+function newRowSheet(dir){
+  const s=openSheet(dir==="out"?"Add money out":"Add money in");
+  const dflt=()=>dir==="out" ? {type:"Spend",category:"Groceries",other:null} : {type:"Income",category:"Salary",other:null};
+  const cats={spend:Model.spendCats(DATA), income:Model.incomeCats(DATA)};
+  const date=el(`<input type="date">`); date.value=Periods.localISO();
+  const amt=el(`<input type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00">`);
+  const name=el(`<input type="text">`);
+  const acc=el(`<select><option value="Debit">Flex (current account)</option><option value="Credit">Credit card</option></select>`);
+  const holder=el(`<div></div>`);
+  let kind=dflt();
+  const build=()=>{
+    const own=acc.value==="Credit"?"Card":"Flex";
+    if(kind.type==="Transfer" && kind.other===own) kind=dflt();
+    const sel=kindSelect(dir, kind, own, cats);
+    sel.onchange=()=>{ kind=parseKind(sel.value); };
+    holder.replaceChildren(sel);
+  };
+  acc.onchange=build; build();
+  const fl=el(`<div class="fields"></div>`);
+  fl.append(wizField("Date", date), wizField("Amount (£)", amt), wizField("Description", name), wizField("Account", acc), wizField("What it is", holder));
+  s.body.appendChild(fl);
+  const ok=el(`<button class="btn pri" style="margin-top:12px">Add</button>`);
+  ok.onclick=()=>{
+    const a=Math.round(parseFloat(amt.value)*100)/100;
+    if(!(a>0)){ toast("Enter an amount"); return; }
+    if(!date.value || date.value<DATA.meta.startDate){ toast("Pick a date from "+Periods.fmtY(DATA.meta.startDate)+" on"); return; }
+    const row={id:(dir==="out"?"t":"i")+Date.now(), date:date.value, amount:a, name:name.value.trim(), card:acc.value, flagged:false, confirmed:true};
+    Model.setKind(row, dir, kind);
+    (dir==="out"?DATA.transactions:DATA.income).push(row);
+    markDirty(); s.close(); render();
+  };
+  s.body.appendChild(ok);
+}
 function moveMonthModal(t){
   const bg=el(`<div class="modal-bg"><div class="modal"><h3 style="margin-top:0">Reassign to a different month</h3></div></div>`);
   const md=bg.querySelector(".modal");

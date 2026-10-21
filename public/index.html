@@ -20,6 +20,7 @@
     <div class="brand">Budget 2026<small id="fileLabel">starting…</small></div>
     <button class="nav" data-view="dashboard"><span class="ic">◧</span><span class="lb">Dashboard</span></button>
     <button class="nav" data-view="ledger"><span class="ic">≣</span><span class="lb">Ledger</span><span class="nbadge" id="badge-ledger"></span></button>
+    <button class="nav" data-view="bills"><span class="ic">▤</span><span class="lb">Bills</span></button>
     <button class="nav" data-view="budget"><span class="ic">◎</span><span class="lb">Budget</span></button>
     <button class="nav" data-view="import"><span class="ic">↧</span><span class="lb">Import</span></button>
     <button class="nav" data-view="rules"><span class="ic">⚗</span><span class="lb">Rules</span></button>
@@ -39,6 +40,8 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.116.0/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
 <script src="js/config.js"></script>
 <script src="js/storage.js"></script>
+<script src="js/periods.js"></script>
+<script src="js/model.js"></script>
 <script src="js/app.js"></script>
 <script>
   if ("serviceWorker" in navigator && location.protocol === "https:") {
