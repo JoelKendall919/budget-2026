@@ -592,6 +592,198 @@
     return { period, daysLeft, flex: bal.flex, card: bal.card, cardOwed, billsDue, bills: due, safe, perDay: round2(safe / Math.max(1, daysLeft)) };
   }
 
+  /* ======================= restart ======================= */
+  // One-off: start the budget again from a payday (docs/plans/
+  // pay-period-budgeting.md 3.6). Rows from that day on are kept and
+  // converted to types and the new categories; the old monthly budgets,
+  // bill lists and earlier rows stay only in the archive (the old document,
+  // saved as is). Nothing here changes the old document.
+  const RESTART_DROPS = ["bills", "yearlyBills", "monthlyBudgets", "billOverrides", "budgets", "budgetDefault"];
+  const CARD_RULE = { match: "member credit card", transfer: "Card" };
+  const clone = x => JSON.parse(JSON.stringify(x));
+  const kept = (rows, start) => (rows || []).filter(r => r.date >= start);
+  const slug = s => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "bill";
+  const descOf = r => String(r.name || "").toLowerCase().replace(/\s+/g, " ").trim();
+
+  // An id for a new bill that no bill in `bills` has yet.
+  function newBillId(name, bills) {
+    const used = new Set((bills || []).map(b => b.id));
+    let id = slug(name);
+    for (let n = 2; used.has(id); n++) id = slug(name) + "-" + n;
+    return id;
+  }
+
+  // Rules with the new names: Savings → transfer to/from savings, Credit →
+  // card repayment, old categories renamed (old rules were for spending, so
+  // "Gifts" stays a spending category); plus the card-repayment rule.
+  function restartRules(rules) {
+    const out = (rules || []).map(r => {
+      if (!r || r.transfer) return r;
+      const c = r.category;
+      if (c === "Savings") return { match: r.match, transfer: "Savings" };
+      if (c === "Credit") return { match: r.match, transfer: "Card" };
+      if (!SPEND_CATS.includes(c) && !OLD_SPEND[c] && (INCOME_CATS.includes(c) || OLD_INCOME[c])) return { match: r.match, category: newIncomeCat(c) };
+      return { match: r.match, category: newSpendCat(c) };
+    });
+    return normaliseRules([CARD_RULE].concat(out));
+  }
+
+  // What the old Reconcile tab linked to each bill: the description and
+  // account seen most often (the latest on a tie), as a starting match text
+  // and account.
+  function billHistory(old) {
+    const seen = {};
+    const bump = (m, k, date) => { const x = m[k] = m[k] || { n: 0, last: "" }; x.n++; if ((date || "") > x.last) x.last = date; };
+    (old.transactions || []).forEach(r => {
+      const names = r.billSplits && r.billSplits.length ? r.billSplits.map(s => s.bill) : [r.bill];
+      new Set(names.filter(Boolean)).forEach(name => {
+        const h = seen[name] = seen[name] || { desc: {}, account: {} };
+        if (descOf(r)) bump(h.desc, descOf(r), r.date);
+        bump(h.account, accountOf(r), r.date);
+      });
+    });
+    const top = m => Object.keys(m).sort((a, b) => m[b].n - m[a].n || m[b].last.localeCompare(m[a].last) || a.localeCompare(b))[0];
+    const out = {};
+    Object.keys(seen).forEach(name => { out[name] = { match: top(seen[name].desc) || "", account: top(seen[name].account) || "Flex" }; });
+    return out;
+  }
+
+  // Bills to set up: the monthly bills at this month's amounts (or the
+  // latest month budgeted), the yearly bills, and the card-repayment
+  // reminder. Due dates are left for you to fill in; £0 bills start unticked.
+  function draftBills(old, start, today) {
+    const mb = old.monthlyBudgets || {}, cur = (today || start).slice(0, 7);
+    const months = Object.keys(mb).sort();
+    const month = months.filter(m => m <= cur).pop() || months[0];
+    const amounts = (month && mb[month] && mb[month].bills) || {};
+    const history = billHistory(old), out = [];
+    const add = (b, freq, amount) => {
+      const h = history[b.name] || {};
+      out.push({
+        id: newBillId(b.name, out), name: b.name, notes: b.notes || "", match: h.match || "",
+        freq, amount: round2(amount), dueDay: null, dueDate: null, account: h.account || "Flex",
+        reminder: false, include: round2(amount) > 0,
+      });
+    };
+    (old.bills || []).forEach(b => add(b, "monthly", +amounts[b.name] || 0));
+    (old.yearlyBills || []).forEach(b => add(b, "yearly", +b.amount || 0));
+    out.push({
+      id: newBillId("credit-card-repayment", out), name: "Credit card repayment", notes: "Reminder only: a transfer, not counted in bills",
+      match: CARD_RULE.match, freq: "monthly", amount: 0, dueDay: null, dueDate: null, account: "Flex", reminder: true, include: true,
+    });
+    return out;
+  }
+
+  // The standard budget to start from: the start month's budget × 12/13
+  // (13 periods a year), rounded to the pound, under the new names. Bills
+  // come from the Bills tab instead; the Savings budget becomes the
+  // savings target.
+  function draftBudget(old, start) {
+    const src = (((old.monthlyBudgets || {})[start.slice(0, 7)] || {}).categories) || {};
+    const cats = {};
+    SPEND_CATS.forEach(c => { if (c !== "Bills") cats[c] = 0; });
+    let savings = 0;
+    Object.keys(src).forEach(c => {
+      const per = Math.round((+src[c] || 0) * 12 / 13);
+      if (c === "Savings") savings += per;
+      else if (c !== "Bills" && c !== "Credit") cats[newSpendCat(c)] += per;
+    });
+    return { cats, savings };
+  }
+
+  // Everything the wizard shows before anything is saved.
+  //   openings  balances at the close of the day before the start
+  //   review    kept rows whose meaning isn't clear (see needsReview), with
+  //             what they'll become (now) and what the rules suggest
+  function restartPreview(old, startIso, today) {
+    const start = startIso || P.DEFAULT_CYCLE.anchor, close = P.addDays(start, -1);
+    const cats = old.categories || [], rules = restartRules(old.rules);
+    const ruleDoc = { incomeCategories: INCOME_CATS };
+    const review = [];
+    [["out", kept(old.transactions, start)], ["in", kept(old.income, start)]].forEach(([dir, rows]) => rows.forEach(row => {
+      if (!needsReview(row, dir)) return;
+      const now = classify(convertRow(row, dir, cats), dir);
+      review.push({ dir, id: row.id, row, now, suggestion: fromRule(ruleFor(rules, row.name), dir, ruleDoc) });
+    }));
+    const count = (rows, k) => (rows || []).length - k;
+    const keptOut = kept(old.transactions, start).length, keptIn = kept(old.income, start).length;
+    return {
+      start, close, openings: balances(old, close),
+      counts: { kept: { out: keptOut, in: keptIn }, archived: { out: count(old.transactions, keptOut), in: count(old.income, keptIn) } },
+      bills: draftBills(old, start, today), budget: draftBudget(old, start), rules, review,
+    };
+  }
+
+  // Anything in the wizard's choices that would make a broken budget, as
+  // messages to show; an empty list means it's safe to confirm.
+  const validDueDate = s => {
+    const m = /^(\d{2})-(\d{2})$/.exec(s || "");
+    return !!m && +m[1] >= 1 && +m[1] <= 12 && +m[2] >= 1 && +m[2] <= P.daysInMonth(2024, +m[1]);
+  };
+  const validDueDay = d => num(d) != null && Number.isInteger(+d) && +d >= 1 && +d <= 31;
+  function restartProblems(choices) {
+    const out = [], c = choices || {}, o = c.openings || {};
+    if (num(o.flex) == null) out.push("Opening Flex balance needs a number.");
+    if (num(o.card) == null) out.push("Opening card balance needs a number.");
+    const ids = new Set();
+    (c.bills || []).filter(b => b.include).forEach(b => {
+      const name = String(b.name || "").trim(), n = name || "A bill";
+      if (!name) out.push("A bill has no name.");
+      if (ids.has(b.id)) out.push(n + ": two bills have the same id."); else ids.add(b.id);
+      if (num(b.amount) == null || +b.amount < 0) out.push(n + ": amount needs a number.");
+      if (b.freq === "yearly") { if (!validDueDate(b.dueDate)) out.push(n + ": set the due date (day and month)."); }
+      else if (b.freq === "monthly") { if (!validDueDay(b.dueDay)) out.push(n + ": set the due day (1–31)."); }
+      else out.push(n + ": monthly or yearly?");
+      if (b.account !== "Flex" && b.account !== "Card") out.push(n + ": paid from Flex or the card?");
+    });
+    Object.keys(c.review || {}).forEach(k => {
+      const v = c.review[k] || {}, dir = k.split(":")[0];
+      const ok = v.type === "Transfer" ? TRANSFER_ACCOUNTS.includes(v.other)
+        : v.type === "Income" ? dir === "in" && INCOME_CATS.includes(v.category)
+          : v.type === "Refund" ? dir === "in" && SPEND_CATS.includes(v.category)
+            : v.type === "Spend" ? dir === "out" && SPEND_CATS.includes(v.category) : false;
+      if (!ok) out.push("A reviewed row needs a type and category that fit it.");
+    });
+    return out;
+  }
+
+  // The new live document. `choices` comes from the wizard:
+  //   {start, openings: {flex, card}, bills: [draft bills, edited],
+  //    budget: {cats, savings}, review: {"out:<id>" | "in:<id>": {type, category, other}}}
+  // Categories, rules (renamed), savings pots, cash and wealth history are
+  // kept; rows before the start and the old budget structures are not.
+  function restartDoc(old, choices) {
+    const c = choices || {}, src = clone(old);
+    const start = c.start || P.DEFAULT_CYCLE.anchor, cats = src.categories || [];
+    const decisions = c.review || {};
+    const convert = dir => row => {
+      const out = convertRow(row, dir, cats), k = decisions[dir + ":" + row.id];
+      return k ? setKind(out, dir, k) : out;
+    };
+    const doc = {};
+    Object.keys(src).forEach(k => { if (!RESTART_DROPS.includes(k)) doc[k] = src[k]; });
+    doc.meta = Object.assign({}, src.meta, { startDate: start, version: 2 });
+    doc.categories = SPEND_CATS.slice();
+    doc.incomeCategories = INCOME_CATS.slice();
+    doc.rules = restartRules(src.rules);
+    doc.accounts = Object.assign({}, src.accounts, {
+      openingFlex: round2(num(c.openings && c.openings.flex) || 0),
+      openingCredit: round2(num(c.openings && c.openings.card) || 0),
+    });
+    doc.transactions = kept(src.transactions, start).map(convert("out"));
+    doc.income = kept(src.income, start).map(convert("in"));
+    doc.payCycle = { anchor: start, days: P.DEFAULT_CYCLE.days, overrides: {} };
+    doc.recurringBills = (c.bills || []).filter(b => b.include).map(b => {
+      const v = { from: start, amount: round2(b.amount), freq: b.freq === "yearly" ? "yearly" : "monthly", account: b.account === "Card" ? "Card" : "Flex" };
+      if (v.freq === "yearly") v.dueDate = b.dueDate; else v.dueDay = +b.dueDay;
+      return { id: b.id, name: String(b.name).trim(), match: String(b.match || "").trim(), notes: b.notes || "", reminder: !!b.reminder, versions: [v], overrides: {} };
+    });
+    const budget = c.budget || { cats: {}, savings: 0 }, std = {};
+    Object.keys(budget.cats || {}).forEach(k => { std[k] = round2(num(budget.cats[k]) || 0); });
+    doc.budget = { standard: [{ from: start, cats: std, savings: round2(num(budget.savings) || 0) }], periods: {} };
+    return doc;
+  }
+
   return {
     TYPES, SPEND_CATS, INCOME_CATS, TRANSFER_ACCOUNTS, OLD_SPEND, OLD_INCOME,
     accountOf, isRestarted, spendCats, incomeCats, round2,
@@ -603,5 +795,6 @@
     changeBillFrom, endBillFrom, overrideBill,
     rowPeriodKey, budgetFor, setBudget, resetBudget, setPay, setPayday,
     periodFlows, payFor, periodBudget, untilPayday,
+    newBillId, restartRules, restartPreview, restartProblems, restartDoc,
   };
 });

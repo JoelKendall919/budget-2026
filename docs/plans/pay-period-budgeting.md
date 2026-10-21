@@ -152,10 +152,10 @@ Removed as categories: **Savings** (now Transfer + savings target) and **Credit*
 2. **Preview** (nothing saved yet):
    - Opening balances at close of 17 Sep — Flex and credit card — calculated from the ledger, **editable** so you can type the bank's figure.
    - Rows kept (18 Sep onwards) vs rows archived.
-   - Bills carried over from today's monthly + yearly bills with their current amounts; **you set each due day** and account; £0 bills can be ticked off.
+   - Bills carried over from today's monthly + yearly bills with their current amounts (this month's figures); **you set each due day** and account; £0 bills start unticked. Each bill's match text and account are suggested from what the old Reconcile tab linked to it (editable). The card-repayment reminder is added as a bill too.
    - Standard category budget pre-filled from September's monthly budget × 12/13 (e.g. £250/month → £231/period), editable; new categories (Shopping, Health & Personal, Home) start at £0 for you to fill in, plus a savings target.
    - **Kept rows converted to types + new categories:** Savings → Transfer (Savings); Credit → Transfer (Card); Takeaway/Restaurant → Eating out; Travel/Car → Transport; Pub/Social → Pub & Social; money in from Salary → Income/Salary; Presents/Gifts → Income/Gifts received; Savings → Transfer from Savings; Bills/Groceries/Pub/etc. → Refund in that category. **Other** rows (out and in) are listed for you to pick a category/type, with a suggestion from the rules.
-   - Rules re-pointed to the new category names; new transfer rules added (Moneybox, Regular Saver, card repayment).
+   - Rules re-pointed to the new category names; Savings rules (Moneybox, Regular Saver, …) become transfer rules and a card-repayment rule is added.
 3. **Confirm:**
    - Whole old document saved to Supabase as a separate archive (`budget-2026-archive`).
    - Live budget rewritten: start date 18 Sep, new opening balances, rows ≥ 18 Sep, new bills + standard budget. Categories, rules, savings, cash and wealth history are kept.
@@ -211,7 +211,7 @@ Each step ends working and tested. Everything is built and tested on this branch
 | 2 | **Row types & accounts** (`model.js`): Spend / Refund / Income / Transfer, new categories, balance rules based on types (card repayment = Transfer to Card), conversion of old rows. *(done)* | Unit tests: converting today's data gives **identical** Flex and card balances; Savings/Credit rows become Transfers; each old category maps as in 3.6. |
 | 3 | **Bills logic** (`model.js`): due occurrences per period, auto-match, statuses, per-occurrence overrides, amount changes from a period onward. *(done)* | Unit tests per status, manual link beats auto-match, skip, paid manually, one-off amount/date. |
 | 4 | **Budget logic** (`model.js`): standard budget + "this period only" + "this and future", spent = Spend − Refund per category, savings target vs net transfers, "count in another period", pay − bills − budgets − savings summary, safe to spend. *(done)* | Unit tests incl. a refund, a transfer (ignored) and a transaction moved to another period. |
-| 5 | **Restart logic** (`model.js`): old document → preview, new live document (with row conversion), archive. | Unit test on a copy of real data: kept/archived counts, openings at close 17 Sep match the Accounts tab today, nothing ≥ 18 Sep lost, no kept row left without a type. |
+| 5 | **Restart logic** (`model.js`): old document → preview, new live document (with row conversion), archive. *(done)* | Unit test on a copy of real data: kept/archived counts, openings at close 17 Sep match the Accounts tab today, nothing ≥ 18 Sep lost, no kept row left without a type. |
 | 6 | **Restart wizard UI** + review of Other rows + save archive to Supabase + "run restart first" gating + import ignores pre-18 Sep rows. | Run wizard locally on exported data; archive row created; import of an old statement skips old rows. |
 | 7 | **Bills tab UI** incl. tap-to-override sheet. | Manual walkthrough on desktop + phone width. |
 | 8 | **Budget tab UI** incl. payday override, savings target and period-only/future edits. | Manual walkthrough on desktop + phone width. |
