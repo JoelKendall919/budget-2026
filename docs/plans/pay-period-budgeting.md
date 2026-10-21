@@ -1,6 +1,6 @@
 # Plan: pay-period budgeting, simpler Bills & Budget, restart from 18 Sep 2026
 
-**Status:** draft for comment — nothing below is built yet
+**Status:** agreed 21 Oct 2026 — being built on this branch (progress in section 7)
 **Branch:** `joelkendall919-pay-period-budgeting`
 
 ---
@@ -206,8 +206,8 @@ Each step ends working and tested. Everything is built and tested on this branch
 
 | Step | What | How we check it |
 |---|---|---|
-| 0 | **Safety:** live-sync ignores archive documents. *(done, uncommitted)* | Editing an archive row doesn't change the open app. |
-| 1 | **Pay-period engine** (`public/js/periods.js`): paydays, period for a date, overrides, bill due dates incl. short months. *(drafted, uncommitted)* | `node --test` unit tests: 18 Sep → 16 Oct → 13 Nov; 21 Oct is in 16 Oct–12 Nov; 31st → 30 Apr; payday override moves one boundary only; rent-on-1st skips 2–29 Apr 2027. |
+| 0 | **Safety:** live-sync ignores archive documents. *(done)* | Editing an archive row doesn't change the open app. |
+| 1 | **Pay-period engine** (`public/js/periods.js`): paydays, period for a date, overrides, bill due dates incl. short months. *(done)* | `node --test` unit tests: 18 Sep → 16 Oct → 13 Nov; 21 Oct is in 16 Oct–12 Nov; 31st → 30 Apr; payday override moves one boundary only; rent-on-1st skips 2–29 Apr 2027. |
 | 2 | **Row types & accounts** (`model.js`): Spend / Refund / Income / Transfer, new categories, balance rules based on types (card repayment = Transfer to Card), conversion of old rows. | Unit tests: converting today's data gives **identical** Flex and card balances; Savings/Credit rows become Transfers; each old category maps as in 3.6. |
 | 3 | **Bills logic** (`model.js`): due occurrences per period, auto-match, statuses, per-occurrence overrides, amount changes from a period onward. | Unit tests per status, manual link beats auto-match, skip, paid manually, one-off amount/date. |
 | 4 | **Budget logic** (`model.js`): standard budget + "this period only" + "this and future", spent = Spend − Refund per category, savings target vs net transfers, "count in another period", pay − bills − budgets − savings summary, safe to spend. | Unit tests incl. a refund, a transfer (ignored) and a transaction moved to another period. |
