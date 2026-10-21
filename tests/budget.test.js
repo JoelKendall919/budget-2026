@@ -198,3 +198,45 @@ test("safe to spend = Flex − card owed − bills still to pay before payday (e
   assert.deepEqual([later.billsDue, later.cardOwed, later.safe], [0, 154, 4399]);
   assert.equal(later.perDay, 1466.33, "3 days left");
 });
+
+/* ---------------- the dashboard's date ranges ---------------- */
+test("a date range: budgets pro-rated by days, bills by due date, payments by bank date", () => {
+  const doc = mkDoc();
+  const r = M.rangeReport(doc, "2026-10-01", "2026-10-31", TODAY);
+  // October has 15 days of the first period and 16 of the second: 230 × 31/28
+  assert.deepEqual(brief(rowOf(r, "Groceries")), ["Groceries", 254.64, 75, 179.64]);
+  assert.deepEqual(brief(rowOf(r, "Pub & Social")), ["Pub & Social", 132.86, 30, 102.86], "the 10 Oct pub counts on its bank date");
+  // due in October: rent 1st, Netflix 10th, phone 14th, Claude 20th (the card reminder doesn't count);
+  // paid in October: phone 12 (16 Oct), Claude 18, rent 675 (31 Oct, for November) + water 20 not a bill
+  assert.deepEqual(brief(rowOf(r, "Bills")), ["Bills", 716, 725, -9]);
+  assert.deepEqual(r.savings, { target: 332.14, saved: 300 });
+  assert.equal(r.flows.income.Salary, 2400);
+  assert.equal(r.totals.spent, 725 + 75 + 5 + 30 + 15);
+});
+
+test("a date range starts no earlier than the budget's start", () => {
+  const r = M.rangeReport(mkDoc(), "2026-09-01", "2026-09-30", TODAY);
+  assert.equal(r.from, "2026-09-18");
+  assert.equal(rowOf(r, "Groceries").budget, 106.79, "13 of 28 days");
+  assert.deepEqual(r.bills.items.map(i => i.bill.id), ["claude"], "Netflix (10 Sep) and the phone (14 Sep) were before the start");
+  assert.equal(r.flows.income.Salary, 2350);
+});
+
+test("a range with a pay period's dates ignores 'count in'; the period itself honours it", () => {
+  const doc = mkDoc();
+  const r = M.rangeReport(doc, "2026-10-16", "2026-11-12", TODAY), b = M.periodBudget(doc, per(K1), TODAY);
+  assert.equal(rowOf(r, "Groceries").budget, 230);
+  assert.equal(rowOf(r, "Pub & Social").spent, 25, "the 12 Nov pub, counted in the next period");
+  assert.equal(rowOf(b, "Pub & Social").spent, 30, "the 10 Oct pub, counted in this one");
+  assert.equal(rowOf(r, "Bills").budget, rowOf(b, "Bills").budget);
+});
+
+test("spend items: Spend adds, Refund takes off, splits split, bill payments are Bills", () => {
+  const doc = mkDoc();
+  const items = M.spendItems(doc, r => r.date >= "2026-10-16" && r.date <= "2026-10-31", new Set(["t3"]));
+  const by = {};
+  items.forEach(i => { by[i.category] = M.round2((by[i.category] || 0) + i.amount); });
+  assert.deepEqual(by, { Bills: 725, Groceries: 75, Home: 5, Hobbies: 15 });
+  assert.ok(items.every(i => i.row && i.date), "each item keeps its row and date");
+  assert.equal(items.filter(i => i.row.id === "t5").length, 3, "30 + 5 split, 5 left in Groceries");
+});

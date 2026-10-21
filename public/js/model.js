@@ -506,12 +506,17 @@
   //                in the period of the bill they paid (see periodBudget)
   // Card repayments and other transfers count nowhere.
   function periodFlows(doc, period, billIds) {
-    const cycle = cycleOf(doc), cats = doc.categories || [];
+    const cycle = cycleOf(doc);
+    return flowsOf(doc, r => inPeriod(cycle, period, r), billIds);
+  }
+  // The same for the rows `keep` accepts.
+  function flowsOf(doc, keep, billIds) {
+    const cats = doc.categories || [];
     const spent = {}, income = {};
     let saved = 0, billPayments = 0;
     const add = (map, c, a) => { map[c] = round2((map[c] || 0) + a); };
     (doc.transactions || []).forEach(r => {
-      if (!inPeriod(cycle, period, r)) return;
+      if (!keep(r)) return;
       const k = classify(r, "out", cats), amt = +r.amount || 0;
       if (k.type === "Transfer") { if (k.other === "Savings") saved += amt; return; }
       if (k.type !== "Spend") return;
@@ -519,7 +524,7 @@
       else allocations(r, k).forEach(a => add(spent, a.category, a.amount));
     });
     (doc.income || []).forEach(r => {
-      if (!inPeriod(cycle, period, r)) return;
+      if (!keep(r)) return;
       const k = classify(r, "in", cats), amt = +r.amount || 0;
       if (k.type === "Transfer") { if (k.other === "Savings") saved -= amt; return; }
       if (k.type === "Refund") allocations(r, k).forEach(a => add(spent, a.category, -a.amount));
@@ -546,28 +551,36 @@
     return last ? { amount: round2(byKey[last]), source: "last", received, from: last } : { amount: 0, source: "none", received };
   }
 
+  // Budget against spent: Bills first, then the spending categories, then
+  // any other category with a budget or spending. `plan` is
+  // {category: {amount, standard, edited}}.
+  function budgetRows(doc, plan, spent, billsBudget, billsSpent) {
+    const known = spendCats(doc).filter(c => c !== "Bills");
+    const extra = new Set();
+    Object.keys(plan).forEach(c => { if (plan[c].amount) extra.add(c); });
+    Object.keys(spent).forEach(c => { if (spent[c]) extra.add(c); });
+    const names = known.concat([...extra].filter(c => c !== "Bills" && !known.includes(c)).sort());
+    const rows = [{ category: "Bills", budget: billsBudget, spent: billsSpent, fromBills: true, edited: false }]
+      .concat(names.map(c => {
+        const p = plan[c] || { amount: 0, standard: 0, edited: false };
+        return { category: c, budget: p.amount, standard: p.standard, edited: p.edited, spent: spent[c] || 0 };
+      }));
+    rows.forEach(r => { r.left = round2(r.budget - r.spent); });
+    const sum = f => round2(rows.reduce((s, r) => s + r[f], 0));
+    return { rows, totals: { budget: sum("budget"), spent: sum("spent"), left: sum("left") } };
+  }
+
   // Everything the Budget tab shows for one period. The Bills row is the
   // Bills tab: budget = bills due this period, spent = what paid them (even
   // a day or two into the next period) plus any other spending in Bills.
   function periodBudget(doc, period, today, timeline) {
     const tl = timeline || timelineFor(doc, period, today);
     const bills = periodBills(doc, period, today, tl);
-    const flows = periodFlows(doc, period, billPaymentIds(tl));
+    const billIds = billPaymentIds(tl);
+    const flows = periodFlows(doc, period, billIds);
     const plan = budgetFor(doc, period.key);
-    const known = spendCats(doc).filter(c => c !== "Bills");
-    const extra = new Set();
-    Object.keys(plan.cats).forEach(c => { if (plan.cats[c].amount) extra.add(c); });
-    Object.keys(flows.spent).forEach(c => { if (flows.spent[c]) extra.add(c); });
-    const names = known.concat([...extra].filter(c => c !== "Bills" && !known.includes(c)).sort());
     const billsSpent = round2(bills.totals.paid + (flows.spent.Bills || 0));
-    const rows = [{ category: "Bills", budget: bills.totals.due, spent: billsSpent, fromBills: true, edited: false }]
-      .concat(names.map(c => {
-        const p = plan.cats[c] || { amount: 0, standard: 0, edited: false };
-        return { category: c, budget: p.amount, standard: p.standard, edited: p.edited, spent: flows.spent[c] || 0 };
-      }));
-    rows.forEach(r => { r.left = round2(r.budget - r.spent); });
-    const sum = f => round2(rows.reduce((s, r) => s + r[f], 0));
-    const totals = { budget: sum("budget"), spent: sum("spent"), left: sum("left") };
+    const { rows, totals } = budgetRows(doc, plan.cats, flows.spent, bills.totals.due, billsSpent);
     const budgets = round2(totals.budget - bills.totals.due);
     const pay = payFor(doc, period, flows, today);
     const savings = { target: plan.savings.amount, standard: plan.savings.standard, edited: plan.savings.edited, saved: flows.saved };
@@ -575,7 +588,7 @@
       pay: pay.amount, billsDue: bills.totals.due, budgets, savings: savings.target,
       unallocated: round2(pay.amount - bills.totals.due - budgets - savings.target),
     };
-    return { period, rows, totals, savings, pay, summary, bills, flows };
+    return { period, rows, totals, savings, pay, summary, bills, flows, billIds };
   }
 
   // The "Until payday" card. Safe to spend = Flex balance − what's owed on
@@ -590,6 +603,54 @@
     const bal = balances(doc, today), cardOwed = bal.card < 0 ? -bal.card : 0;
     const safe = round2(bal.flex - cardOwed - billsDue), daysLeft = P.diffDays(today, period.next);
     return { period, daysLeft, flex: bal.flex, card: bal.card, cardOwed, billsDue, bills: due, safe, perDay: round2(safe / Math.max(1, daysLeft)) };
+  }
+
+  // The dashboard's Week / Month / Year / All views, by bank date ("count
+  // in" is for pay periods only). Each pay period's budget counts for the
+  // share of its days inside the range; bills count when due inside it; a
+  // payment that paid a bill counts in Bills on the day it was made, and a
+  // bill marked paid by hand on the day given.
+  function rangeReport(doc, fromIso, toIso, today) {
+    const from = maxIso(fromIso, startOf(doc)), to = toIso;
+    const tl = billTimeline(doc, P.addDays(maxIso(to, today), AHEAD_DAYS));
+    const billIds = billPaymentIds(tl);
+    const flows = flowsOf(doc, r => r.date >= from && r.date <= to, billIds);
+    const raw = {};
+    let savings = 0;
+    P.periodsBetween(cycleOf(doc), from, to).forEach(p => {
+      const share = (P.diffDays(maxIso(p.start, from), p.end < to ? p.end : to) + 1) / p.days;
+      const b = budgetFor(doc, p.key);
+      Object.keys(b.cats).forEach(c => { raw[c] = (raw[c] || 0) + b.cats[c].amount * share; });
+      savings += b.savings.amount * share;
+    });
+    const plan = {};
+    Object.keys(raw).forEach(c => { plan[c] = { amount: round2(raw[c]), standard: round2(raw[c]), edited: false }; });
+    const inRange = iso => iso >= from && iso <= to;
+    const items = tl.filter(o => inRange(o.date)).map(o => describeBill(o, today));
+    const due = round2(items.filter(i => !i.reminder && i.status !== "skipped").reduce((s, i) => s + i.expected, 0));
+    const manual = tl.filter(o => o.how === "manual" && !o.bill.reminder).map(o => describeBill(o, today))
+      .filter(i => inRange(i.paidDate));
+    const byHand = manual.reduce((s, i) => s + i.paidAmount, 0);
+    const billsSpent = round2(flows.billPayments + byHand + (flows.spent.Bills || 0));
+    const { rows, totals } = budgetRows(doc, plan, flows.spent, due, billsSpent);
+    return { from, to, rows, totals, savings: { target: round2(savings), saved: flows.saved }, bills: { items, manual, totals: { due } }, flows, billIds };
+  }
+
+  // Spending in pieces {row, date, category, amount} for charts: Spend adds,
+  // Refund takes off, and a payment that paid a bill (id in `billIds`)
+  // counts in Bills. `keep` picks the rows.
+  function spendItems(doc, keep, billIds) {
+    const cats = doc.categories || [], out = [];
+    const take = (dir, sign) => r => {
+      if (keep && !keep(r)) return;
+      const k = classify(r, dir, cats);
+      if (k.type !== (dir === "out" ? "Spend" : "Refund")) return;
+      const parts = dir === "out" && billIds && billIds.has(r.id) ? [{ category: "Bills", amount: +r.amount || 0 }] : allocations(r, k);
+      parts.forEach(a => out.push({ row: r, date: r.date, category: a.category, amount: round2(sign * a.amount) }));
+    };
+    (doc.transactions || []).forEach(take("out", 1));
+    (doc.income || []).forEach(take("in", -1));
+    return out;
   }
 
   /* ======================= restart ======================= */
@@ -839,7 +900,7 @@
     billVersion, billOccurrences, billTimeline, billStatus, describeBill, periodBills, billPaymentIds,
     changeBillFrom, endBillFrom, overrideBill,
     rowPeriodKey, budgetFor, setBudget, resetBudget, setPay, setPayday,
-    periodFlows, payFor, periodBudget, untilPayday,
+    periodFlows, payFor, periodBudget, untilPayday, rangeReport, spendItems,
     newBillId, billProblems, restartRules, restartPreview, restartProblems, restartDoc, tidyDoc,
   };
 });

@@ -7,6 +7,7 @@
     --radius:10px;
     --c-Bills:#5b6bef; --c-Groceries:#1a9b6c; --c-PubSocial:#e0803a; --c-Takeaway:#d6548a;
     --c-Travel:#3aa5c9; --c-Gifts:#9b6bd6; --c-Other:#8a94a6; --c-Savings:#12a594;
+    --c-Shopping:#c9a227; --c-Health:#8cb83a; --c-Home:#a0714f;
   }
   /* dark palette applies when the OS asks for it AND no explicit choice is set,
      or whenever the user has explicitly chosen dark. data-theme="light" always wins. */
