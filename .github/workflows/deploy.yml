@@ -1,6 +1,7 @@
 name: Deploy to GitHub Pages
 
-# Builds the static app and publishes it. The Supabase URL and anon key are
+# Runs the unit tests, then builds the static app and publishes it. A failing
+# test stops the deploy. The Supabase URL and anon key are
 # injected here from repository secrets rather than being committed, so the
 # repo stays clean and you can repoint it without a code change.
 #
@@ -30,6 +31,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Tests that need your real data (local/, never committed) skip here.
+      - name: Unit tests
+        run: node --test tests/*.test.js
 
       - name: Inject Supabase configuration
         env:

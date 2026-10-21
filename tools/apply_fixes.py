@@ -16,6 +16,10 @@ bank doesn't" has two very different causes:
   * MISSING      — the bank has a row the app doesn't. We add it, using your
                    rules to categorise, flagged for review.
 
+Once the budget has been restarted, only rows from its start date are
+compared, and an added row gets a type (spend, income, transfer…) from your
+rules exactly as the app's Import would give it.
+
 Nothing is written unless you pass --write, and a timestamped backup is
 taken first.
 
@@ -38,7 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from budget_lib import (  # noqa: E402
-    Doc, Statement, StatementRow, load_statements, money, norm_name,
+    Doc, Statement, StatementRow, checking_from, load_statements, money, norm_name,
 )
 
 BOLD, DIM, RED, GRN, YEL, CYN, OFF = (
@@ -109,14 +113,43 @@ def classify(missing: list[StatementRow], extra: list[dict], window: int):
 # --------------------------------------------------------------------------
 
 
-def categorise(doc: Doc, text: str) -> str | None:
-    """Apply the app's merchant rules (longest match first, as app.js does)."""
+def rule_for(doc: Doc, text: str) -> dict | None:
+    """The app's merchant rule for a description (longest match first, as the app does)."""
     t = (text or "").lower()
     for r in sorted(doc.raw.get("rules", []), key=lambda r: -len(r.get("match", ""))):
         m = (r.get("match") or "").lower()
         if m and m in t:
-            return r.get("category")
+            return r
     return None
+
+
+INCOME_CATS = ("Salary", "Gifts received", "Other income")
+
+
+def kind_for(doc: Doc, rule: dict | None, out: bool) -> tuple[str, str | None, str | None]:
+    """
+    (type, category, transfer account) for a new row in a restarted budget,
+    as the app's import does it (model.js fromRule). With no rule: Spend in
+    Other, or Income in Other income.
+    """
+    if not rule:
+        return ("Spend", "Other", None) if out else ("Income", "Other income", None)
+    if rule.get("transfer"):
+        return "Transfer", None, rule["transfer"]
+    cat = rule.get("category") or "Other"
+    if cat in (doc.raw.get("incomeCategories") or INCOME_CATS):
+        return ("Spend", "Other", None) if out else ("Income", cat, None)
+    return ("Spend" if out else "Refund"), cat, None
+
+
+def describe_add(doc: Doc, r: StatementRow) -> str:
+    rule = rule_for(doc, r.description)
+    if doc.start_date:
+        kind, cat, other = kind_for(doc, rule, r.paid_out > 0)
+        text = f"{kind} {'to' if r.paid_out > 0 else 'from'} {other}" if kind == "Transfer" else f"{kind} · {cat}"
+    else:
+        text = (rule or {}).get("category") or "Other"
+    return text if rule else text + " (needs review)"
 
 
 def apply_move(row: dict, target: StatementRow) -> None:
@@ -131,22 +164,23 @@ def apply_delete(doc: Doc, row: dict) -> None:
 
 def apply_add(doc: Doc, r: StatementRow, card: str, n: int) -> dict:
     new_id = f"fix{int(time.time())}_{n}"
-    if r.paid_out > 0:
-        cat = categorise(doc, r.description)
-        row = {
-            "id": new_id, "date": r.date, "amount": money(r.paid_out),
-            "name": r.description, "category": cat or "Other", "card": card,
-            "flagged": cat is None, "confirmed": False,
-        }
-        doc.raw["transactions"].append(row)
+    out = r.paid_out > 0
+    rule = rule_for(doc, r.description)
+    row = {
+        "id": new_id, "date": r.date, "amount": money(r.paid_out if out else r.paid_in),
+        "name": r.description, "card": card,
+        "flagged": rule is None, "confirmed": False,
+    }
+    if doc.start_date:
+        kind, cat, other = kind_for(doc, rule, out)
+        row["type"] = kind
+        if kind == "Transfer":
+            row["to" if out else "from"] = other
+        else:
+            row["category"] = cat
     else:
-        src = categorise(doc, r.description)
-        row = {
-            "id": new_id, "date": r.date, "amount": money(r.paid_in),
-            "name": r.description, "source": src or "Other", "card": card,
-            "flagged": src is None, "confirmed": False,
-        }
-        doc.raw["income"].append(row)
+        row["category" if out else "source"] = (rule or {}).get("category") or "Other"
+    doc.raw["transactions" if out else "income"].append(row)
     return row
 
 
@@ -178,7 +212,7 @@ def main() -> int:
     print(f"  bank says    {target:>10.2f}")
     print(f"  difference   {money(before-target):>+10.2f}\n")
 
-    missing, extra = diff_against(doc, st, a.since)
+    missing, extra = diff_against(doc, st, checking_from(doc, a.since))
     moves, dupes, adds = classify(missing, extra, a.window)
 
     if not (moves or dupes or adds):
@@ -201,8 +235,7 @@ def main() -> int:
     if adds:
         print(f"{GRN}{BOLD}Add — on the statement, missing from the app{OFF}")
         for m in adds:
-            cat = categorise(doc, m.description) or "Other (needs review)"
-            print(f"  {m.date}  {m.delta:>9.2f}  {m.description[:44]}  {DIM}→ {cat}{OFF}")
+            print(f"  {m.date}  {m.delta:>9.2f}  {m.description[:44]}  {DIM}→ {describe_add(doc, m)}{OFF}")
         print()
 
     # -- what the balance will be afterwards -------------------------------
