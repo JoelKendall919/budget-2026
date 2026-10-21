@@ -79,7 +79,7 @@ One table for the selected pay period (‹ › to move):
 
 - **Top summary:** Pay £X − bills due £Y − category budgets £Z − savings target £S = **left unallocated**.
   Pay = salary received in the period; for a future period, your last pay (editable).
-- **Bills row** is read-only — always the total from the Bills tab for that period.
+- **Bills row** is read-only — always the total from the Bills tab for that period. Its spent is what paid those bills (even if a payment lands a day or two after payday) plus anything else in Bills.
 - **One standard budget** for every period. Editing a number asks: **"This period only"** or **"This and future periods"**. Period-only changes show ✏️ with "Reset to standard".
 - **Spent** = Spend rows in that category in the period, minus Refund rows in the same category (see 3.7). Transfers never count.
 - **Savings target** row (not a category): planned vs. **net saved** = transfers to savings − transfers back from savings in the period.
@@ -87,7 +87,7 @@ One table for the selected pay period (‹ › to move):
 
 ### 3.4 Dashboard
 - New default view **Pay period**; Week / Month / Year / All stay for reporting (budgets pro-rated by day for Week/Month).
-- New **Until payday** card: days left · Flex balance now · Flex bills still due before payday · card balance owed · **safe to spend** (= Flex balance − card balance owed − Flex bills still due before payday) · per-day allowance. Card purchases therefore reduce safe to spend straight away, even though the card is paid off later.
+- New **Until payday** card: days left · Flex balance now · bills still due before payday · card balance owed · **safe to spend** (= Flex balance − card balance owed − bills still due before payday, on either account: a card bill not yet charged is about to be owed on the card) · per-day allowance. Card purchases therefore reduce safe to spend straight away, even though the card is paid off later.
 - "Bills seen" card becomes **Bills this period** (same statuses as the Bills tab).
 - Pace, trend, top merchants, cash flow, net worth stay — they just follow the selected pay period.
 
@@ -187,7 +187,7 @@ Until the restart has been run, Bills and Budget tabs show "Run the restart firs
 | A1 | The credit-card repayment is a **Transfer** from Flex to the card — never spending (the card purchases already were). It shows on the Bills tab as a reminder only, outside the bills total. |
 | A2 | Bills paid **on the credit card** count when charged to the card. |
 | A3 | Savings is **not** a spending category any more: it's a savings target on the Budget tab, measured by net transfers to savings in the period. |
-| A4 | Most day-to-day spending goes on the credit card, paid off in full monthly. Safe to spend = Flex balance − **whole card balance owed** − Flex bills still due before payday. Available credit is never counted as money. |
+| A4 | Most day-to-day spending goes on the credit card, paid off in full monthly. Safe to spend = Flex balance − **whole card balance owed** − bills still due before payday (Flex or card). Available credit is never counted as money. |
 | A5 | Matching window = 5 days either side of the due date; overdue = 2 days after the due date with no payment. |
 | A6 | Standard category budget starts at September × 12/13 (you'll edit it in the wizard anyway). |
 | A7 | No in-app viewer for the archive — download only. Can be added later. |
@@ -210,7 +210,7 @@ Each step ends working and tested. Everything is built and tested on this branch
 | 1 | **Pay-period engine** (`public/js/periods.js`): paydays, period for a date, overrides, bill due dates incl. short months. *(done)* | `node --test` unit tests: 18 Sep → 16 Oct → 13 Nov; 21 Oct is in 16 Oct–12 Nov; 31st → 30 Apr; payday override moves one boundary only; rent-on-1st skips 2–29 Apr 2027. |
 | 2 | **Row types & accounts** (`model.js`): Spend / Refund / Income / Transfer, new categories, balance rules based on types (card repayment = Transfer to Card), conversion of old rows. *(done)* | Unit tests: converting today's data gives **identical** Flex and card balances; Savings/Credit rows become Transfers; each old category maps as in 3.6. |
 | 3 | **Bills logic** (`model.js`): due occurrences per period, auto-match, statuses, per-occurrence overrides, amount changes from a period onward. *(done)* | Unit tests per status, manual link beats auto-match, skip, paid manually, one-off amount/date. |
-| 4 | **Budget logic** (`model.js`): standard budget + "this period only" + "this and future", spent = Spend − Refund per category, savings target vs net transfers, "count in another period", pay − bills − budgets − savings summary, safe to spend. | Unit tests incl. a refund, a transfer (ignored) and a transaction moved to another period. |
+| 4 | **Budget logic** (`model.js`): standard budget + "this period only" + "this and future", spent = Spend − Refund per category, savings target vs net transfers, "count in another period", pay − bills − budgets − savings summary, safe to spend. *(done)* | Unit tests incl. a refund, a transfer (ignored) and a transaction moved to another period. |
 | 5 | **Restart logic** (`model.js`): old document → preview, new live document (with row conversion), archive. | Unit test on a copy of real data: kept/archived counts, openings at close 17 Sep match the Accounts tab today, nothing ≥ 18 Sep lost, no kept row left without a type. |
 | 6 | **Restart wizard UI** + review of Other rows + save archive to Supabase + "run restart first" gating + import ignores pre-18 Sep rows. | Run wizard locally on exported data; archive row created; import of an old statement skips old rows. |
 | 7 | **Bills tab UI** incl. tap-to-override sheet. | Manual walkthrough on desktop + phone width. |
@@ -222,13 +222,14 @@ Each step ends working and tested. Everything is built and tested on this branch
 ## 8. Go-live checklist
 1. Data → Export a fresh backup from the live site.
 2. Merge this branch → site deploys.
-3. Run the restart wizard: check opening balances against the bank at 17 Sep, set bill due days and accounts, check the standard budget and savings target, sort the Other rows.
-4. Import Flex + card statements from 18 Sep to today (anything already there is de-duplicated as now).
-5. Check Bills tab statuses for 18 Sep–15 Oct and the current period; fix any with a manual override.
-6. Accounts tab balances match the bank today; run `reconcile.py` for 18 Sep onwards.
-7. Open on your phone and confirm the same numbers.
+3. Reload or close the app on **every** device (phone home-screen app and any laptop tabs), so nothing is still running the old version when the restart saves.
+4. Run the restart wizard: check opening balances against the bank at 17 Sep, set bill due days and accounts, check the standard budget and savings target, sort the Other rows.
+5. Import Flex + card statements from 18 Sep to today (anything already there is de-duplicated as now).
+6. Check Bills tab statuses for 18 Sep–15 Oct and the current period; fix any with a manual override.
+7. Accounts tab balances match the bank today; run `reconcile.py` for 18 Sep onwards.
+8. Open on your phone and confirm the same numbers.
 
 ## 9. Risks
 - **The restart rewrites the live document.** Mitigated by JSON backup + Supabase archive + daily version history.
-- **An old open tab** (another device) could save the old shape after the restart → the existing conflict prompt appears; choose "use cloud copy".
+- **An old open tab** (another device) could save the old shape after the restart → checklist step 3 (reload everywhere first). The new bills, budget and pay cycle are stored under new names the old version never touches; if an old tab does save, the conflict prompt appears — choose "use cloud copy".
 - **Wrong opening balance** throws every later balance off → the wizard shows the computed figure next to an editable box; check it against the 17 Sep statement.

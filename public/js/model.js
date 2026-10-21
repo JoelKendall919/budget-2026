@@ -403,6 +403,195 @@
     return bill;
   }
 
+  /* ======================= pay-period budget ======================= */
+  // doc.budget:
+  //   standard  [{from: periodKey, cats: {category: amount}, savings}], oldest
+  //             first; each applies from its period on ("this and future")
+  //   periods   {periodKey: {cats: {category: amount}, savings, pay}} —
+  //             "this period only" changes, and a pay figure typed by hand
+  const byFrom = (a, b) => a.from.localeCompare(b.from);
+
+  // The period a row is budgeted in: its "count in" period, or its date's.
+  function rowPeriodKey(doc, row) {
+    const cycle = cycleOf(doc);
+    if (row.countIn && P.periodByKey(cycle, row.countIn)) return row.countIn;
+    return ISO_RE.test(row.date || "") ? P.periodFor(cycle, row.date).key : null;
+  }
+  function inPeriod(cycle, period, row) {
+    if (row.countIn && P.periodByKey(cycle, row.countIn)) return row.countIn === period.key;
+    return row.date >= period.start && row.date <= period.end;
+  }
+
+  function standardAt(doc, key) {
+    let v = null;
+    ((doc.budget && doc.budget.standard) || []).slice().sort(byFrom).forEach(x => { if (x.from <= key) v = x; });
+    return v || { from: null, cats: {}, savings: 0 };
+  }
+  // A period's budget: the standard in force, with "this period only"
+  // changes on top (edited: true).
+  function budgetFor(doc, key) {
+    const std = standardAt(doc, key), own = ((doc.budget && doc.budget.periods) || {})[key] || {};
+    const sc = std.cats || {}, oc = own.cats || {}, cats = {};
+    new Set([...Object.keys(sc), ...Object.keys(oc)]).forEach(c => {
+      const s = num(sc[c]) || 0, o = num(oc[c]);
+      cats[c] = { amount: o != null ? o : s, standard: s, edited: o != null };
+    });
+    const ss = num(std.savings) || 0, os = num(own.savings);
+    return { cats, savings: { amount: os != null ? os : ss, standard: ss, edited: os != null }, pay: num(own.pay) };
+  }
+
+  // Set a category budget (category) or the savings target (category null)
+  // for "period" (this period only) or "future" (this and future periods).
+  function setBudget(doc, key, category, amount, scope) {
+    const b = doc.budget = doc.budget || {};
+    b.standard = b.standard || []; b.periods = b.periods || {};
+    const value = num(amount) || 0;
+    const put = x => { if (category == null) x.savings = value; else (x.cats = x.cats || {})[category] = value; };
+    if (scope === "period") { put(b.periods[key] = b.periods[key] || {}); return doc; }
+    if (!b.standard.some(x => x.from === key)) {
+      const base = standardAt(doc, key);
+      b.standard.push({ from: key, cats: Object.assign({}, base.cats), savings: num(base.savings) || 0 });
+    }
+    b.standard.sort(byFrom).forEach(x => { if (x.from >= key) put(x); });
+    return resetBudget(doc, key, category);
+  }
+  // "Reset to standard": drop this period's own figure.
+  function resetBudget(doc, key, category) {
+    const periods = doc.budget && doc.budget.periods, own = periods && periods[key];
+    if (!own) return doc;
+    if (category == null) delete own.savings;
+    else if (own.cats) { delete own.cats[category]; if (!Object.keys(own.cats).length) delete own.cats; }
+    if (!Object.keys(own).length) delete periods[key];
+    return doc;
+  }
+  // Pay typed by hand for one period (null goes back to automatic).
+  function setPay(doc, key, amount) {
+    const b = doc.budget = doc.budget || {};
+    b.periods = b.periods || {};
+    const v = num(amount);
+    if (v != null) (b.periods[key] = b.periods[key] || {}).pay = v;
+    else if (b.periods[key]) { delete b.periods[key].pay; if (!Object.keys(b.periods[key]).length) delete b.periods[key]; }
+    return doc;
+  }
+  // Move one payday (key = its usual date); null or the usual date puts it
+  // back. Returns false if the date is half a period or more away.
+  function setPayday(doc, key, iso) {
+    const c = P.normCycle(cycleOf(doc));
+    if (!P.periodByKey(c, key)) return false;
+    const overrides = Object.assign({}, c.overrides);
+    if (!iso || iso === key) delete overrides[key];
+    else if (!ISO_RE.test(iso) || Math.abs(P.diffDays(key, iso)) * 2 >= c.days) return false;
+    else overrides[key] = iso;
+    doc.payCycle = { anchor: c.anchor, days: c.days, overrides };
+    return true;
+  }
+
+  // A row's amount by category: its splits, with anything not split counted
+  // in the row's own category.
+  function allocations(row, kind) {
+    const amt = +row.amount || 0, own = kind.category || "Other";
+    const splits = (row.categorySplits || []).filter(s => s && s.category);
+    if (!splits.length) return [{ category: own, amount: amt }];
+    const out = splits.map(s => ({ category: s.category, amount: +s.amount || 0 }));
+    const rest = round2(amt - out.reduce((s, a) => s + a.amount, 0));
+    if (rest) out.push({ category: own, amount: rest });
+    return out;
+  }
+  // Money that counts in one period (its "count in" period, or its date's).
+  //   spent        Spend − Refund per category
+  //   income       Income per income category
+  //   saved        transfers to savings − transfers back from savings
+  //   billPayments payments that paid a bill (ids in `billIds`); they are
+  //                left out of `spent`, because the Budget tab counts them
+  //                in the period of the bill they paid (see periodBudget)
+  // Card repayments and other transfers count nowhere.
+  function periodFlows(doc, period, billIds) {
+    const cycle = cycleOf(doc), cats = doc.categories || [];
+    const spent = {}, income = {};
+    let saved = 0, billPayments = 0;
+    const add = (map, c, a) => { map[c] = round2((map[c] || 0) + a); };
+    (doc.transactions || []).forEach(r => {
+      if (!inPeriod(cycle, period, r)) return;
+      const k = classify(r, "out", cats), amt = +r.amount || 0;
+      if (k.type === "Transfer") { if (k.other === "Savings") saved += amt; return; }
+      if (k.type !== "Spend") return;
+      if (billIds && billIds.has(r.id)) billPayments += amt;
+      else allocations(r, k).forEach(a => add(spent, a.category, a.amount));
+    });
+    (doc.income || []).forEach(r => {
+      if (!inPeriod(cycle, period, r)) return;
+      const k = classify(r, "in", cats), amt = +r.amount || 0;
+      if (k.type === "Transfer") { if (k.other === "Savings") saved -= amt; return; }
+      if (k.type === "Refund") allocations(r, k).forEach(a => add(spent, a.category, -a.amount));
+      else if (k.type === "Income") add(income, k.category || "Other income", amt);
+    });
+    return { spent, income, saved: round2(saved), billPayments: round2(billPayments) };
+  }
+
+  // Pay for the summary: typed by hand › salary received in the period ›
+  // for the current or a future period, the last pay received › 0.
+  function payFor(doc, period, flows, today) {
+    const received = flows.income.Salary || 0, typed = budgetFor(doc, period.key).pay;
+    if (typed != null) return { amount: typed, source: "typed", received };
+    if (received > 0) return { amount: received, source: "received", received };
+    if (period.end < today) return { amount: 0, source: "none", received };
+    const cats = doc.categories || [], byKey = {};
+    (doc.income || []).forEach(r => {
+      const k = classify(r, "in", cats);
+      if (k.type !== "Income" || k.category !== "Salary") return;
+      const key = rowPeriodKey(doc, r);
+      if (key && key < period.key) byKey[key] = (byKey[key] || 0) + (+r.amount || 0);
+    });
+    const last = Object.keys(byKey).sort().pop();
+    return last ? { amount: round2(byKey[last]), source: "last", received, from: last } : { amount: 0, source: "none", received };
+  }
+
+  // Everything the Budget tab shows for one period. The Bills row is the
+  // Bills tab: budget = bills due this period, spent = what paid them (even
+  // a day or two into the next period) plus any other spending in Bills.
+  function periodBudget(doc, period, today, timeline) {
+    const tl = timeline || timelineFor(doc, period, today);
+    const bills = periodBills(doc, period, today, tl);
+    const flows = periodFlows(doc, period, billPaymentIds(tl));
+    const plan = budgetFor(doc, period.key);
+    const known = spendCats(doc).filter(c => c !== "Bills");
+    const extra = new Set();
+    Object.keys(plan.cats).forEach(c => { if (plan.cats[c].amount) extra.add(c); });
+    Object.keys(flows.spent).forEach(c => { if (flows.spent[c]) extra.add(c); });
+    const names = known.concat([...extra].filter(c => c !== "Bills" && !known.includes(c)).sort());
+    const billsSpent = round2(bills.totals.paid + (flows.spent.Bills || 0));
+    const rows = [{ category: "Bills", budget: bills.totals.due, spent: billsSpent, fromBills: true, edited: false }]
+      .concat(names.map(c => {
+        const p = plan.cats[c] || { amount: 0, standard: 0, edited: false };
+        return { category: c, budget: p.amount, standard: p.standard, edited: p.edited, spent: flows.spent[c] || 0 };
+      }));
+    rows.forEach(r => { r.left = round2(r.budget - r.spent); });
+    const sum = f => round2(rows.reduce((s, r) => s + r[f], 0));
+    const totals = { budget: sum("budget"), spent: sum("spent"), left: sum("left") };
+    const budgets = round2(totals.budget - bills.totals.due);
+    const pay = payFor(doc, period, flows, today);
+    const savings = { target: plan.savings.amount, standard: plan.savings.standard, edited: plan.savings.edited, saved: flows.saved };
+    const summary = {
+      pay: pay.amount, billsDue: bills.totals.due, budgets, savings: savings.target,
+      unallocated: round2(pay.amount - bills.totals.due - budgets - savings.target),
+    };
+    return { period, rows, totals, savings, pay, summary, bills, flows };
+  }
+
+  // The "Until payday" card. Safe to spend = Flex balance − what's owed on
+  // the card − bills still to pay before payday (on either account: a card
+  // bill will be added to what's owed when it's charged). The card
+  // repayment is a transfer, so it changes nothing here.
+  function untilPayday(doc, today, timeline) {
+    const period = P.periodFor(cycleOf(doc), today);
+    const bills = periodBills(doc, period, today, timeline || timelineFor(doc, period, today));
+    const due = bills.items.filter(i => !i.reminder && i.status !== "paid" && i.status !== "skipped");
+    const billsDue = round2(due.reduce((s, i) => s + i.expected, 0));
+    const bal = balances(doc, today), cardOwed = bal.card < 0 ? -bal.card : 0;
+    const safe = round2(bal.flex - cardOwed - billsDue), daysLeft = P.diffDays(today, period.next);
+    return { period, daysLeft, flex: bal.flex, card: bal.card, cardOwed, billsDue, bills: due, safe, perDay: round2(safe / Math.max(1, daysLeft)) };
+  }
+
   return {
     TYPES, SPEND_CATS, INCOME_CATS, TRANSFER_ACCOUNTS, OLD_SPEND, OLD_INCOME,
     accountOf, isRestarted, spendCats, incomeCats, round2,
@@ -412,5 +601,7 @@
     MATCH_DAYS, OVERDUE_DAYS, cycleOf, startOf,
     billVersion, billOccurrences, billTimeline, billStatus, periodBills, billPaymentIds,
     changeBillFrom, endBillFrom, overrideBill,
+    rowPeriodKey, budgetFor, setBudget, resetBudget, setPay, setPayday,
+    periodFlows, payFor, periodBudget, untilPayday,
   };
 });
