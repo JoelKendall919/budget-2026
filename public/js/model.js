@@ -195,11 +195,222 @@
     return !(s === "Savings" || OLD_INCOME[s] || (OLD_SPEND[s] && s !== "Other"));
   }
 
+  /* ======================= bills ======================= */
+  // doc.recurringBills — each bill:
+  //   {id, name, match, notes, reminder, versions, overrides}
+  //   match      text to find in the statement description (defaults to the name)
+  //   reminder   true for the card repayment: it gets a status like any bill
+  //              but is a transfer, so it is never added to the totals
+  //   versions   oldest first; each applies to due dates from its period on:
+  //              {from: periodKey, amount, freq: "monthly"|"yearly",
+  //               dueDay: 1-31 (monthly) | dueDate: "MM-DD" (yearly),
+  //               account: "Flex"|"Card"}   or {from, off: true} once ended
+  //   overrides  one occurrence each, keyed by its slot — "2026-10" (monthly)
+  //              or "2027" (yearly), so a one-off survives a due-day change:
+  //              {skip, amount, date, links: [transaction ids], paid: {date, amount}}
+  const MATCH_DAYS = 5, OVERDUE_DAYS = 2, DATE_MOVE_DAYS = 31, AHEAD_DAYS = 62;
+  const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const cycleOf = doc => (doc && doc.payCycle) || P.DEFAULT_CYCLE;
+  const startOf = doc => (doc && doc.meta && doc.meta.startDate) || P.normCycle(cycleOf(doc)).anchor;
+  const maxIso = (a, b) => (a > b ? a : b);
+  const sortedVersions = bill => (bill.versions || []).slice().sort((a, b) => a.from.localeCompare(b.from));
+  const matchTextOf = bill => String(bill.match || bill.name || "").trim().toLowerCase();
+  const hasOverride = ov => !!ov && Object.keys(ov).some(k => ov[k] != null);
+  const num = v => (v == null || v === "" || !isFinite(+v) ? null : +v);
+
+  // The version in force for a period, or null if the bill hasn't started or has ended.
+  function billVersion(bill, key) {
+    let v = null;
+    for (const x of sortedVersions(bill)) if (x.from <= key) v = x;
+    return v && !v.off ? v : null;
+  }
+
+  // Every occurrence of one bill whose (possibly moved) date is in [fromIso, toIso].
+  // Slots are numbered over whole years, so they don't depend on the window.
+  function billOccurrences(bill, cycle, fromIso, toIso) {
+    const versions = sortedVersions(bill), cands = [];
+    const lo = P.addDays(fromIso, -40).slice(0, 4) + "-01-01", hi = P.addDays(toIso, 40).slice(0, 4) + "-12-31";
+    versions.forEach(v => {
+      if (v.off) return;
+      const sched = v.freq === "yearly" ? { dueDate: v.dueDate } : { dueDay: v.dueDay };
+      P.occurrences(sched, lo, hi).forEach(d => {
+        if (billVersion(bill, P.periodFor(cycle, d).key) === v) cands.push({ scheduled: d, version: v });
+      });
+    });
+    cands.sort((a, b) => a.scheduled.localeCompare(b.scheduled));
+    const seen = {}, out = [];
+    cands.forEach(c => {
+      const base = c.version.freq === "yearly" ? c.scheduled.slice(0, 4) : c.scheduled.slice(0, 7);
+      seen[base] = (seen[base] || 0) + 1;
+      const slot = seen[base] === 1 ? base : base + "#" + seen[base];
+      const override = (bill.overrides || {})[slot] || {};
+      const moved = ISO_RE.test(override.date || "") && Math.abs(P.diffDays(c.scheduled, override.date)) <= DATE_MOVE_DAYS;
+      const date = moved ? override.date : c.scheduled;
+      if (date >= fromIso && date <= toIso) out.push({ bill, slot, scheduled: c.scheduled, date, version: c.version, override });
+    });
+    return out;
+  }
+
+  // Decide which payments paid which occurrence (sets o.payments and o.how).
+  // Manual choices win: a skipped or paid-by-hand occurrence takes no
+  // payment, `links` (even an empty list) replaces the automatic match, and
+  // a payment linked by hand is never matched to anything else. Otherwise a
+  // payment matches when it is on the bill's account, its description holds
+  // the match text and it is within MATCH_DAYS of the due date. Each payment
+  // pays one bill: closest amount first, then closest date.
+  function matchBills(doc, occs) {
+    const tx = doc.transactions || [];
+    const byId = new Map(tx.map(r => [r.id, r]));
+    const claimed = new Set();
+    occs.forEach(o => (o.override.links || []).forEach(id => claimed.add(id)));
+    const sorted = tx.map((r, i) => ({ r, i })).filter(x => x.r.date).sort((a, b) => a.r.date.localeCompare(b.r.date) || a.i - b.i);
+    const dates = sorted.map(x => x.r.date);
+    const lowerBound = iso => { let a = 0, b = dates.length; while (a < b) { const m = (a + b) >> 1; if (dates[m] < iso) a = m + 1; else b = m; } return a; };
+    const pairs = [];
+    occs.forEach((o, oi) => {
+      const ov = o.override;
+      o.payments = []; o.how = null;
+      if (ov.skip) return;
+      if (ov.paid) { o.how = "manual"; return; }
+      if (ov.links) { o.payments = ov.links.map(id => byId.get(id)).filter(Boolean); o.how = o.payments.length ? "linked" : null; return; }
+      const text = matchTextOf(o.bill), account = o.version.account || "Flex", expected = expectedOf(o);
+      if (!text) return;
+      const last = P.addDays(o.date, MATCH_DAYS);
+      for (let k = lowerBound(P.addDays(o.date, -MATCH_DAYS)); k < sorted.length && sorted[k].r.date <= last; k++) {
+        const { r, i } = sorted[k];
+        if (claimed.has(r.id) || accountOf(r) !== account || !String(r.name || "").toLowerCase().includes(text)) continue;
+        pairs.push({ oi, i, r, amt: Math.abs(round2((+r.amount || 0) - expected)), days: Math.abs(P.diffDays(o.date, r.date)) });
+      }
+    });
+    pairs.sort((a, b) => a.amt - b.amt || a.days - b.days || occs[a.oi].date.localeCompare(occs[b.oi].date) || a.oi - b.oi || a.i - b.i);
+    const usedRow = new Set(), doneOcc = new Set();
+    pairs.forEach(p => {
+      if (usedRow.has(p.i) || doneOcc.has(p.oi)) return;
+      usedRow.add(p.i); doneOcc.add(p.oi);
+      occs[p.oi].payments = [p.r]; occs[p.oi].how = "auto";
+    });
+    const uses = new Map();
+    occs.forEach(o => o.payments.forEach(r => uses.set(r.id, (uses.get(r.id) || 0) + 1)));
+    occs.forEach(o => { o.shared = o.payments.some(r => uses.get(r.id) > 1); });
+    return occs;
+  }
+  function expectedOf(o) {
+    const a = num(o.override.amount);
+    return a != null ? a : (+o.version.amount || 0);
+  }
+
+  // Every occurrence of every bill from the budget's start to `untilIso`,
+  // with its payments. Work this out once per screen and pass it around;
+  // `untilIso` should be well past today so nothing near today is cut off.
+  function billTimeline(doc, untilIso) {
+    const cycle = cycleOf(doc), from = startOf(doc), occs = [];
+    (doc.recurringBills || []).forEach(b => occs.push(...billOccurrences(b, cycle, from, untilIso)));
+    occs.sort((a, b) => a.date.localeCompare(b.date) || String(a.bill.name).localeCompare(String(b.bill.name)));
+    return matchBills(doc, occs);
+  }
+  const timelineFor = (doc, period, today) => billTimeline(doc, P.addDays(maxIso(period.end, today), AHEAD_DAYS));
+
+  // paid · skipped · upcoming (not due yet) · due (today or yesterday,
+  // probably still clearing) · overdue (OVERDUE_DAYS after the due date)
+  function billStatus(o, today) {
+    if (o.override.skip) return "skipped";
+    if (o.how === "manual" || o.payments.length) return "paid";
+    const late = P.diffDays(o.date, today);
+    return late < 0 ? "upcoming" : late < OVERDUE_DAYS ? "due" : "overdue";
+  }
+  function describeBill(o, today) {
+    const status = billStatus(o, today), expected = expectedOf(o), ov = o.override;
+    let paidAmount = null, paidDate = null;
+    if (status === "paid") {
+      if (o.how === "manual") { paidAmount = num(ov.paid.amount) != null ? +ov.paid.amount : expected; paidDate = ov.paid.date || o.date; }
+      else { paidAmount = round2(o.payments.reduce((s, r) => s + (+r.amount || 0), 0)); paidDate = o.payments[0].date; }
+    }
+    return {
+      bill: o.bill, slot: o.slot, version: o.version, scheduled: o.scheduled, date: o.date,
+      expected, status, how: o.how, payments: o.payments, paidAmount, paidDate, shared: !!o.shared,
+      // a payment shared between bills can't be compared with one bill's
+      // amount, and a reminder's amount is only a guide
+      diff: paidAmount == null || o.shared || o.bill.reminder ? null : round2(paidAmount - expected),
+      daysUntil: P.diffDays(today, o.date), edited: hasOverride(ov), reminder: !!o.bill.reminder,
+    };
+  }
+
+  // What the Bills tab shows for one period: each due bill with its status,
+  // the bills in force that aren't due this period, and the totals (the
+  // card-repayment reminder and skipped bills are left out of the totals).
+  function periodBills(doc, period, today, timeline) {
+    const tl = timeline || timelineFor(doc, period, today);
+    const items = tl.filter(o => o.date >= period.start && o.date <= period.end).map(o => describeBill(o, today));
+    const dueIds = new Set(items.map(i => i.bill.id));
+    const notDue = (doc.recurringBills || []).filter(b => !dueIds.has(b.id) && billVersion(b, period.key));
+    const counted = items.filter(i => !i.reminder && i.status !== "skipped");
+    const seenRows = new Set();
+    let due = 0, paid = 0, toPay = 0;
+    counted.forEach(i => {
+      due += i.expected;
+      if (i.status !== "paid") { toPay += i.expected; return; }
+      if (i.how === "manual") { paid += i.paidAmount; return; }
+      i.payments.forEach(r => { if (!seenRows.has(r.id)) { seenRows.add(r.id); paid += +r.amount || 0; } });
+    });
+    const days = P.normCycle(cycleOf(doc)).days;
+    const smoothed = (doc.recurringBills || []).reduce((s, b) => {
+      const v = !b.reminder && billVersion(b, period.key);
+      return v ? s + P.smoothedPerPeriod(v.amount, v.freq, days) : s;
+    }, 0);
+    return { items, notDue, totals: { due: round2(due), paid: round2(paid), toPay: round2(toPay), smoothed: round2(smoothed) } };
+  }
+
+  // Ids of payments that paid a bill (not the card reminder); those rows count as Bills.
+  function billPaymentIds(timeline) {
+    const ids = new Set();
+    timeline.forEach(o => { if (!o.bill.reminder && !o.override.skip) o.payments.forEach(r => ids.add(r.id)); });
+    return ids;
+  }
+
+  /* ---- changing bills (these edit the bill passed in) ---- */
+  const VERSION_FIELDS = ["amount", "freq", "dueDay", "dueDate", "account"];
+  // Change a bill from a period onwards; earlier periods keep what they were,
+  // and the changed fields are also set on any later versions.
+  function changeBillFrom(bill, key, changes) {
+    const fields = VERSION_FIELDS.filter(f => f in changes);
+    const versions = sortedVersions(bill);
+    let v = versions.find(x => x.from === key);
+    if (!v || v.off) {
+      const base = versions.filter(x => x.from < key && !x.off).pop() || {};
+      if (!v) { v = { from: key }; versions.push(v); }
+      delete v.off;
+      VERSION_FIELDS.forEach(f => { if (base[f] != null) v[f] = base[f]; });
+    }
+    versions.forEach(x => {
+      if (x.from < key || x.off) return;
+      fields.forEach(f => { if (changes[f] == null) delete x[f]; else x[f] = changes[f]; });
+    });
+    bill.versions = versions.sort((a, b) => a.from.localeCompare(b.from));
+    return bill;
+  }
+  // Stop a bill from a period onwards (later versions go too).
+  function endBillFrom(bill, key) {
+    bill.versions = sortedVersions(bill).filter(x => x.from < key).concat([{ from: key, off: true }]);
+    return bill;
+  }
+  // One-off changes to one occurrence; null clears a field, and an empty
+  // override is removed.
+  function overrideBill(bill, slot, changes) {
+    const ov = Object.assign({}, (bill.overrides || {})[slot], changes);
+    Object.keys(ov).forEach(k => { if (ov[k] == null) delete ov[k]; });
+    bill.overrides = Object.assign({}, bill.overrides);
+    if (Object.keys(ov).length) bill.overrides[slot] = ov; else delete bill.overrides[slot];
+    return bill;
+  }
+
   return {
     TYPES, SPEND_CATS, INCOME_CATS, TRANSFER_ACCOUNTS, OLD_SPEND, OLD_INCOME,
     accountOf, isRestarted, spendCats, incomeCats, round2,
     classify, effects, ledger, balances,
     normaliseRules, ruleFor, fromRule, setKind,
     newSpendCat, newIncomeCat, convertRow, needsReview,
+    MATCH_DAYS, OVERDUE_DAYS, cycleOf, startOf,
+    billVersion, billOccurrences, billTimeline, billStatus, periodBills, billPaymentIds,
+    changeBillFrom, endBillFrom, overrideBill,
   };
 });
